@@ -1,22 +1,21 @@
 # Bela Caixa API
 
-Estrutura de NFC-e da Bela Modas pronta.
+Versão corrigida com persistência em disco.
 
-## Status atual
-- Cupom visual estruturado
-- XML estruturado
-- Exportação de XML por mês
-- Exportação de XML por período
+## Correção principal
+Antes as notas ficavam só na memória.
+Se a API reiniciasse, URLs antigas davam "Nota não encontrada".
 
-## Rotas úteis
-- GET /health
-- POST /nfce/emitir
-- GET /nfce/:id/pdf
-- GET /nfce/:id/xml
-- GET /nfce/xml/mes/AAAA-MM
-- GET /nfce/xml/periodo?inicio=AAAA-MM-DD&fim=AAAA-MM-DD
-- GET /nfce/lista
+Agora cada nota emitida é salva em:
+- storage/notas/<id>.json
 
-## Pendências
-- certificado A1
-- conexão com SEFAZ
+## Recursos
+- Cupom térmico 80mm
+- XML individual
+- XML do mês
+- XML por período
+- Persistência local das notas
+
+## Observação
+Depois de subir esta versão, emita novas notas.
+As notas antigas emitidas pela versão em memória não podem ser recuperadas.

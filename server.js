@@ -2,6 +2,9 @@ import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
 import zlib from "zlib";
+import fs from "fs";
+import fsp from "fs/promises";
+import path from "path";
 
 const app = express();
 app.use(cors());
@@ -9,6 +12,9 @@ app.use(express.json({ limit: "2mb" }));
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || "https://bela-caixa-api.onrender.com";
+
+const DATA_DIR = path.resolve("./storage");
+const NOTAS_DIR = path.join(DATA_DIR, "notas");
 
 const EMPRESA = {
   razao_social: "APARECIDA DE JESUS MIRANDA",
@@ -27,11 +33,11 @@ const EMPRESA = {
   pais: "BRASIL"
 };
 
-const notas = new Map();
 let sequencial = 1;
 
 function somenteDigitos(v = "") { return String(v || "").replace(/\D+/g, ""); }
 function dinheiro(v) { return Number(v || 0).toFixed(2); }
+function moeda(v) { return Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function dataMesRef(iso) {
   const d = new Date(iso || Date.now());
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, "0")}`;
@@ -58,6 +64,56 @@ function formatarTelefone(fone) {
   if (d.length === 11) return d.replace(/^(\d{2})(\d{5})(\d{4})$/, "($1) $2-$3");
   if (d.length === 10) return d.replace(/^(\d{2})(\d{4})(\d{4})$/, "($1) $2-$3");
   return fone || "";
+}
+function esc(s = "") {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function ensureDataDirs() {
+  await fsp.mkdir(NOTAS_DIR, { recursive: true });
+}
+
+function notaPath(id) {
+  return path.join(NOTAS_DIR, `${id}.json`);
+}
+
+async function salvarNota(nota) {
+  await ensureDataDirs();
+  await fsp.writeFile(notaPath(nota.id), JSON.stringify(nota, null, 2), "utf-8");
+}
+
+async function lerNota(id) {
+  try {
+    const raw = await fsp.readFile(notaPath(id), "utf-8");
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function listarNotas() {
+  await ensureDataDirs();
+  const files = await fsp.readdir(NOTAS_DIR);
+  const out = [];
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const raw = await fsp.readFile(path.join(NOTAS_DIR, file), "utf-8");
+      out.push(JSON.parse(raw));
+    } catch {}
+  }
+  out.sort((a,b) => new Date(a.dataEmissaoIso || 0) - new Date(b.dataEmissaoIso || 0));
+  return out;
+}
+
+async function carregarSequencial() {
+  const notas = await listarNotas();
+  const max = notas.reduce((m, n) => Math.max(m, Number(n.numero || 0)), 0);
+  sequencial = max + 1;
 }
 
 function obterProdutoFiscal(item = {}) {
@@ -102,53 +158,100 @@ function normalizarPayload(body = {}) {
 }
 
 function gerarCupomHTML(nota) {
-  const linhas = nota.itens.map((item, idx) => `
-    <tr>
-      <td>${idx + 1}</td>
-      <td><strong>${item.descricao}</strong><br><small>Cód: ${item.codigo || "-"} | NCM: ${item.ncm} | CFOP: ${item.cfop} | CSOSN: ${item.csosn}</small></td>
-      <td>${item.unidade}</td>
-      <td style="text-align:right">${item.quantidade}</td>
-      <td style="text-align:right">R$ ${dinheiro(item.valorUnitario)}</td>
-      <td style="text-align:right">R$ ${dinheiro(item.valorTotal)}</td>
-    </tr>`).join("");
+  const itens = nota.itens.map((item) => `
+    <div class="item">
+      <div class="desc">${esc(item.descricao)}</div>
+      <div class="meta">NCM ${esc(item.ncm)} | CFOP ${esc(item.cfop)} | CSOSN ${esc(item.csosn)}</div>
+      <div class="linha">
+        <span>${esc(item.unidade)} ${item.quantidade} x R$ ${moeda(item.valorUnitario)}</span>
+        <strong>R$ ${moeda(item.valorTotal)}</strong>
+      </div>
+    </div>
+  `).join("");
 
   return `<!DOCTYPE html>
-<html lang="pt-BR"><head><meta charset="UTF-8"><title>NFC-e ${nota.numero}</title>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>NFC-e ${nota.numero}</title>
 <style>
-body{font-family:Arial,sans-serif;padding:20px;color:#111} .wrap{max-width:820px;margin:0 auto}
-h1,h2,p{margin:0 0 8px} .topo{border-bottom:2px dashed #333;padding-bottom:12px;margin-bottom:12px}
-.box{border-top:1px dashed #333;padding-top:12px;margin-top:12px} table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{padding:8px 6px;border-bottom:1px solid #ddd;vertical-align:top} th{text-align:left;background:#f2f2f2}
-.t-right{text-align:right} small{color:#555} .total{font-size:20px;font-weight:700}
-</style></head><body>
-<div class="wrap">
-<div class="topo">
-<h1>${EMPRESA.nome_fantasia}</h1>
-<p>${EMPRESA.razao_social}</p>
-<p>CNPJ: ${formatarCNPJ(EMPRESA.cnpj)} | IE: ${EMPRESA.ie} | CRT: ${EMPRESA.crt} - ${EMPRESA.regime}</p>
-<p>${EMPRESA.logradouro}, ${EMPRESA.numero} - ${EMPRESA.bairro} - ${EMPRESA.cidade}/${EMPRESA.uf} - CEP ${formatarCEP(EMPRESA.cep)}</p>
-<p>Telefone: ${formatarTelefone(EMPRESA.fone)}</p>
-</div>
-<h2>NFC-e EM ESTRUTURA DE TESTE</h2>
-<p><strong>Número:</strong> ${nota.numero} | <strong>Série:</strong> ${nota.serie} | <strong>Data:</strong> ${nota.dataEmissaoBR}</p>
-<p><strong>ID interno:</strong> ${nota.id}</p>
-<p><strong>Cliente:</strong> ${nota.cliente && nota.cliente.cpf ? nota.cliente.nome + " - CPF " + nota.cliente.cpf : "CONSUMIDOR NAO IDENTIFICADO"}</p>
-<div class="box">
-<table><thead><tr><th>#</th><th>Produto</th><th>UN</th><th class="t-right">Qtd</th><th class="t-right">Vl Unit</th><th class="t-right">Total</th></tr></thead><tbody>${linhas}</tbody></table>
-</div>
-<div class="box">
-<p class="t-right"><strong>Subtotal:</strong> R$ ${dinheiro(nota.subtotal)}</p>
-<p class="t-right"><strong>Desconto:</strong> R$ ${dinheiro(nota.desconto)}</p>
-<p class="t-right total">TOTAL: R$ ${dinheiro(nota.total)}</p>
-<p class="t-right"><strong>Pagamento:</strong> ${nota.pagamento.tipo} - R$ ${dinheiro(nota.pagamento.valor)}</p>
-</div>
-<div class="box">
-<p><strong>Status:</strong> ${nota.status}</p>
-<p><strong>Chave (pré-estrutura):</strong> ${nota.chave}</p>
-<p><strong>Ambiente:</strong> HOMOLOGAÇÃO / ESTRUTURA</p>
-<p><strong>Observação:</strong> pendente apenas certificado A1 e conexão com SEFAZ.</p>
-</div>
-</div></body></html>`;
+  :root{ --w:80mm; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; background:#fff; color:#111; font-family:Arial,Helvetica,sans-serif; }
+  body{ padding:10px; }
+  .sheet{ width:min(100%, var(--w)); margin:0 auto; border:1px solid #ddd; padding:10px 12px; }
+  .center{text-align:center;}
+  .top strong{ font-size:18px; display:block; margin-bottom:4px; }
+  .sub{ font-size:12px; line-height:1.35; }
+  .sep{ border-top:1px dashed #000; margin:8px 0; }
+  .title{ font-size:14px; font-weight:700; text-align:center; margin:4px 0; }
+  .line{ font-size:12px; line-height:1.35; margin:2px 0; }
+  .item{ padding:6px 0; border-bottom:1px dotted #bbb; }
+  .item:last-child{ border-bottom:none; }
+  .desc{ font-size:13px; font-weight:700; line-height:1.2; margin-bottom:2px; word-break:break-word; }
+  .meta{ font-size:10px; color:#444; line-height:1.2; }
+  .linha{ display:flex; justify-content:space-between; gap:8px; font-size:12px; margin-top:4px; }
+  .totais{ margin-top:6px; }
+  .totais .linha{ font-size:13px; }
+  .totais .grand{ font-size:18px; font-weight:800; }
+  .foot{ font-size:11px; line-height:1.35; text-align:center; }
+  .print-actions{ width:min(100%, var(--w)); margin:10px auto 0; display:flex; gap:8px; justify-content:center; flex-wrap:wrap; }
+  .print-actions button{ border:none; background:#1a5276; color:#fff; padding:8px 12px; border-radius:8px; cursor:pointer; font-size:12px; font-weight:700; }
+  .print-actions button.secondary{ background:#666; }
+  @media print{
+    @page{ size:80mm auto; margin:2mm; }
+    body{ padding:0; }
+    .sheet{ width:76mm; border:none; padding:0; margin:0 auto; }
+    .print-actions{ display:none !important; }
+  }
+</style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="top center">
+      <strong>${esc(EMPRESA.nome_fantasia)}</strong>
+      <div class="sub">${esc(EMPRESA.razao_social)}</div>
+      <div class="sub">CNPJ: ${formatarCNPJ(EMPRESA.cnpj)}</div>
+      <div class="sub">IE: ${esc(EMPRESA.ie)} | CRT: ${esc(EMPRESA.crt)} - ${esc(EMPRESA.regime)}</div>
+      <div class="sub">${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)}</div>
+      <div class="sub">${esc(EMPRESA.bairro)} - ${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)} - CEP ${formatarCEP(EMPRESA.cep)}</div>
+      <div class="sub">Telefone: ${formatarTelefone(EMPRESA.fone)}</div>
+    </div>
+
+    <div class="sep"></div>
+    <div class="title">NFC-e EM ESTRUTURA DE TESTE</div>
+    <div class="line"><strong>Número:</strong> ${nota.numero} | <strong>Série:</strong> ${nota.serie}</div>
+    <div class="line"><strong>Data:</strong> ${nota.dataEmissaoBR}</div>
+    <div class="line"><strong>ID:</strong> ${esc(nota.id)}</div>
+    <div class="line"><strong>Cliente:</strong> ${esc((nota.cliente && nota.cliente.cpf) ? (nota.cliente.nome + " - CPF " + nota.cliente.cpf) : "CONSUMIDOR NAO IDENTIFICADO")}</div>
+
+    <div class="sep"></div>
+    ${itens}
+    <div class="sep"></div>
+
+    <div class="totais">
+      <div class="linha"><span>Subtotal</span><strong>R$ ${moeda(nota.subtotal)}</strong></div>
+      <div class="linha"><span>Desconto</span><strong>R$ ${moeda(nota.desconto)}</strong></div>
+      <div class="linha grand"><span>TOTAL</span><strong>R$ ${moeda(nota.total)}</strong></div>
+      <div class="linha"><span>Pagamento ${esc(nota.pagamento.tipo)}</span><strong>R$ ${moeda(nota.pagamento.valor)}</strong></div>
+    </div>
+
+    <div class="sep"></div>
+    <div class="foot">
+      <div><strong>Status:</strong> ${esc(nota.status)}</div>
+      <div><strong>Chave:</strong> ${esc(nota.chave)}</div>
+      <div>AMBIENTE DE HOMOLOGAÇÃO / ESTRUTURA</div>
+      <div>SEM VALOR FISCAL</div>
+      <div>Pendente apenas certificado A1 e conexão com SEFAZ.</div>
+    </div>
+  </div>
+
+  <div class="print-actions">
+    <button onclick="window.print()">🖨️ Imprimir cupom</button>
+    <button class="secondary" onclick="window.close()">Fechar</button>
+  </div>
+</body>
+</html>`;
 }
 
 function gerarXML(nota) {
@@ -247,10 +350,13 @@ function makeZip(files) {
 }
 
 app.get("/", (req, res) => res.send("API Bela Modas rodando"));
-app.get("/health", (req, res) => res.json({ status: "ok", empresa: EMPRESA.nome_fantasia }));
+app.get("/health", async (req, res) => {
+  const total = (await listarNotas()).length;
+  res.json({ status: "ok", empresa: EMPRESA.nome_fantasia, total_notas: total, proximo_numero: sequencial });
+});
 app.get("/empresa", (req, res) => res.json(EMPRESA));
 
-app.post("/nfce/emitir", (req, res) => {
+app.post("/nfce/emitir", async (req, res) => {
   try {
     const venda = normalizarPayload(req.body);
     const id = randomUUID();
@@ -266,7 +372,9 @@ app.post("/nfce/emitir", (req, res) => {
     };
     nota.pdf_url = `${BASE_URL}/nfce/${id}/pdf`;
     nota.xml_url = `${BASE_URL}/nfce/${id}/xml`;
-    notas.set(id, nota);
+
+    await salvarNota(nota);
+
     res.json({ ok: true, mensagem: "NFC-e estruturada com sucesso.", nfce: {
       id: nota.id, numero: nota.numero, serie: nota.serie, chave: nota.chave, status: nota.status,
       pdf_url: nota.pdf_url, xml_url: nota.xml_url
@@ -276,24 +384,24 @@ app.post("/nfce/emitir", (req, res) => {
   }
 });
 
-app.get("/nfce/:id", (req, res) => {
-  const nota = notas.get(req.params.id);
+app.get("/nfce/:id", async (req, res) => {
+  const nota = await lerNota(req.params.id);
   if (!nota) return res.status(404).json({ ok: false, error: "Nota não encontrada." });
   res.json({ ok: true, nfce: nota });
 });
-app.get("/nfce/:id/pdf", (req, res) => {
-  const nota = notas.get(req.params.id);
+app.get("/nfce/:id/pdf", async (req, res) => {
+  const nota = await lerNota(req.params.id);
   if (!nota) return res.status(404).send("Nota não encontrada.");
   res.type("html").send(gerarCupomHTML(nota));
 });
-app.get("/nfce/:id/xml", (req, res) => {
-  const nota = notas.get(req.params.id);
+app.get("/nfce/:id/xml", async (req, res) => {
+  const nota = await lerNota(req.params.id);
   if (!nota) return res.status(404).type("text/xml").send("<erro>Nota não encontrada</erro>");
   res.type("text/xml").send(gerarXML(nota));
 });
-app.get("/nfce/xml/mes/:mes", (req, res) => {
+app.get("/nfce/xml/mes/:mes", async (req, res) => {
   const mes = String(req.params.mes || "");
-  const lista = [...notas.values()].filter(n => n.mesRef === mes);
+  const lista = (await listarNotas()).filter(n => n.mesRef === mes);
   if (!lista.length) return res.status(404).json({ ok: false, error: "Nenhum XML encontrado para este mês." });
   const files = lista.map(n => ({ name: nomeArquivoXML(n), data: gerarXML(n), date: n.dataEmissaoIso }));
   const zipBuffer = makeZip(files);
@@ -301,12 +409,12 @@ app.get("/nfce/xml/mes/:mes", (req, res) => {
   res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${mes}.zip"`);
   res.send(zipBuffer);
 });
-app.get("/nfce/xml/periodo", (req, res) => {
+app.get("/nfce/xml/periodo", async (req, res) => {
   const inicio = String(req.query.inicio || "");
   const fim = String(req.query.fim || "");
   const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
   const dFim = fim ? new Date(fim + "T23:59:59") : null;
-  const lista = [...notas.values()].filter(n => {
+  const lista = (await listarNotas()).filter(n => {
     const d = new Date(n.dataEmissaoIso);
     if (dIni && d < dIni) return false;
     if (dFim && d > dFim) return false;
@@ -320,12 +428,21 @@ app.get("/nfce/xml/periodo", (req, res) => {
   res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${nome}.zip"`);
   res.send(zipBuffer);
 });
-app.get("/nfce/lista", (req, res) => {
-  const notasResumo = [...notas.values()].map(n => ({
+app.get("/nfce/lista", async (req, res) => {
+  const notas = await listarNotas();
+  const notasResumo = notas.map(n => ({
     id: n.id, numero: n.numero, serie: n.serie, data: n.dataEmissaoIso, total: n.total,
     cliente: n.cliente.nome, status: n.status, xml_url: n.xml_url, pdf_url: n.pdf_url, mesRef: n.mesRef
   }));
   res.json({ ok: true, total: notasResumo.length, notas: notasResumo });
 });
 
-app.listen(PORT, () => console.log(`Bela Caixa API rodando na porta ${PORT}`));
+ensureDataDirs()
+  .then(carregarSequencial)
+  .then(() => {
+    app.listen(PORT, () => console.log(`Bela Caixa API rodando na porta ${PORT}`));
+  })
+  .catch(err => {
+    console.error("Falha ao iniciar API:", err);
+    process.exit(1);
+  });

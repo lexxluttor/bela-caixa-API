@@ -1,7 +1,7 @@
 {
   "name": "bela-caixa-api",
-  "version": "2.1.0",
-  "description": "API da Bela Modas com estrutura de NFC-e pronta e exportação de XML por mês/período",
+  "version": "2.3.0",
+  "description": "API da Bela Modas com persistência em disco, cupom térmico e XML por mês/período",
   "main": "server.js",
   "type": "module",
   "scripts": {
