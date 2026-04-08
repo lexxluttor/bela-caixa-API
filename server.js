@@ -32,7 +32,6 @@ let sequencial = 1;
 
 function somenteDigitos(v = "") { return String(v || "").replace(/\D+/g, ""); }
 function dinheiro(v) { return Number(v || 0).toFixed(2); }
-function moeda(v) { return Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function dataMesRef(iso) {
   const d = new Date(iso || Date.now());
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, "0")}`;
@@ -59,13 +58,6 @@ function formatarTelefone(fone) {
   if (d.length === 11) return d.replace(/^(\d{2})(\d{5})(\d{4})$/, "($1) $2-$3");
   if (d.length === 10) return d.replace(/^(\d{2})(\d{4})(\d{4})$/, "($1) $2-$3");
   return fone || "";
-}
-function esc(s = "") {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 
 function obterProdutoFiscal(item = {}) {
@@ -110,127 +102,53 @@ function normalizarPayload(body = {}) {
 }
 
 function gerarCupomHTML(nota) {
-  const itens = nota.itens.map((item) => `
-    <div class="item">
-      <div class="desc">${esc(item.descricao)}</div>
-      <div class="meta">NCM ${esc(item.ncm)} | CFOP ${esc(item.cfop)} | CSOSN ${esc(item.csosn)}</div>
-      <div class="linha">
-        <span>${esc(item.unidade)} ${item.quantidade} x R$ ${moeda(item.valorUnitario)}</span>
-        <strong>R$ ${moeda(item.valorTotal)}</strong>
-      </div>
-    </div>
-  `).join("");
+  const linhas = nota.itens.map((item, idx) => `
+    <tr>
+      <td>${idx + 1}</td>
+      <td><strong>${item.descricao}</strong><br><small>Cód: ${item.codigo || "-"} | NCM: ${item.ncm} | CFOP: ${item.cfop} | CSOSN: ${item.csosn}</small></td>
+      <td>${item.unidade}</td>
+      <td style="text-align:right">${item.quantidade}</td>
+      <td style="text-align:right">R$ ${dinheiro(item.valorUnitario)}</td>
+      <td style="text-align:right">R$ ${dinheiro(item.valorTotal)}</td>
+    </tr>`).join("");
 
   return `<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8">
-<title>NFC-e ${nota.numero}</title>
+<html lang="pt-BR"><head><meta charset="UTF-8"><title>NFC-e ${nota.numero}</title>
 <style>
-  :root{ --w:80mm; }
-  *{ box-sizing:border-box; }
-  html,body{ margin:0; padding:0; background:#fff; color:#111; font-family:Arial,Helvetica,sans-serif; }
-  body{ padding:10px; }
-  .sheet{
-    width:min(100%, var(--w));
-    margin:0 auto;
-    border:1px solid #ddd;
-    padding:10px 12px;
-  }
-  .center{text-align:center;}
-  .top strong{ font-size:18px; display:block; margin-bottom:4px; }
-  .sub{ font-size:12px; line-height:1.35; }
-  .sep{ border-top:1px dashed #000; margin:8px 0; }
-  .title{ font-size:14px; font-weight:700; text-align:center; margin:4px 0; }
-  .line{ font-size:12px; line-height:1.35; margin:2px 0; }
-  .item{ padding:6px 0; border-bottom:1px dotted #bbb; }
-  .item:last-child{ border-bottom:none; }
-  .desc{ font-size:13px; font-weight:700; line-height:1.2; margin-bottom:2px; word-break:break-word; }
-  .meta{ font-size:10px; color:#444; line-height:1.2; }
-  .linha{
-    display:flex;
-    justify-content:space-between;
-    gap:8px;
-    font-size:12px;
-    margin-top:4px;
-  }
-  .totais{ margin-top:6px; }
-  .totais .linha{ font-size:13px; }
-  .totais .grand{ font-size:18px; font-weight:800; }
-  .foot{ font-size:11px; line-height:1.35; text-align:center; }
-  .print-actions{
-    width:min(100%, var(--w));
-    margin:10px auto 0;
-    display:flex;
-    gap:8px;
-    justify-content:center;
-    flex-wrap:wrap;
-  }
-  .print-actions button{
-    border:none;
-    background:#1a5276;
-    color:#fff;
-    padding:8px 12px;
-    border-radius:8px;
-    cursor:pointer;
-    font-size:12px;
-    font-weight:700;
-  }
-  .print-actions button.secondary{ background:#666; }
-  @media print{
-    @page{ size:80mm auto; margin:2mm; }
-    body{ padding:0; }
-    .sheet{ width:76mm; border:none; padding:0; margin:0 auto; }
-    .print-actions{ display:none !important; }
-  }
-</style>
-</head>
-<body>
-  <div class="sheet">
-    <div class="top center">
-      <strong>${esc(EMPRESA.nome_fantasia)}</strong>
-      <div class="sub">${esc(EMPRESA.razao_social)}</div>
-      <div class="sub">CNPJ: ${formatarCNPJ(EMPRESA.cnpj)}</div>
-      <div class="sub">IE: ${esc(EMPRESA.ie)} | CRT: ${esc(EMPRESA.crt)} - ${esc(EMPRESA.regime)}</div>
-      <div class="sub">${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)}</div>
-      <div class="sub">${esc(EMPRESA.bairro)} - ${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)} - CEP ${formatarCEP(EMPRESA.cep)}</div>
-      <div class="sub">Telefone: ${formatarTelefone(EMPRESA.fone)}</div>
-    </div>
-
-    <div class="sep"></div>
-    <div class="title">NFC-e EM ESTRUTURA DE TESTE</div>
-    <div class="line"><strong>Número:</strong> ${nota.numero} | <strong>Série:</strong> ${nota.serie}</div>
-    <div class="line"><strong>Data:</strong> ${nota.dataEmissaoBR}</div>
-    <div class="line"><strong>ID:</strong> ${esc(nota.id)}</div>
-    <div class="line"><strong>Cliente:</strong> ${esc((nota.cliente && nota.cliente.cpf) ? (nota.cliente.nome + " - CPF " + nota.cliente.cpf) : "CONSUMIDOR NAO IDENTIFICADO")}</div>
-
-    <div class="sep"></div>
-    ${itens}
-    <div class="sep"></div>
-
-    <div class="totais">
-      <div class="linha"><span>Subtotal</span><strong>R$ ${moeda(nota.subtotal)}</strong></div>
-      <div class="linha"><span>Desconto</span><strong>R$ ${moeda(nota.desconto)}</strong></div>
-      <div class="linha grand"><span>TOTAL</span><strong>R$ ${moeda(nota.total)}</strong></div>
-      <div class="linha"><span>Pagamento ${esc(nota.pagamento.tipo)}</span><strong>R$ ${moeda(nota.pagamento.valor)}</strong></div>
-    </div>
-
-    <div class="sep"></div>
-    <div class="foot">
-      <div><strong>Status:</strong> ${esc(nota.status)}</div>
-      <div><strong>Chave:</strong> ${esc(nota.chave)}</div>
-      <div>AMBIENTE DE HOMOLOGAÇÃO / ESTRUTURA</div>
-      <div>SEM VALOR FISCAL</div>
-      <div>Pendente apenas certificado A1 e conexão com SEFAZ.</div>
-    </div>
-  </div>
-
-  <div class="print-actions">
-    <button onclick="window.print()">🖨️ Imprimir cupom</button>
-    <button class="secondary" onclick="window.close()">Fechar</button>
-  </div>
-</body>
-</html>`;
+body{font-family:Arial,sans-serif;padding:20px;color:#111} .wrap{max-width:820px;margin:0 auto}
+h1,h2,p{margin:0 0 8px} .topo{border-bottom:2px dashed #333;padding-bottom:12px;margin-bottom:12px}
+.box{border-top:1px dashed #333;padding-top:12px;margin-top:12px} table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:8px 6px;border-bottom:1px solid #ddd;vertical-align:top} th{text-align:left;background:#f2f2f2}
+.t-right{text-align:right} small{color:#555} .total{font-size:20px;font-weight:700}
+</style></head><body>
+<div class="wrap">
+<div class="topo">
+<h1>${EMPRESA.nome_fantasia}</h1>
+<p>${EMPRESA.razao_social}</p>
+<p>CNPJ: ${formatarCNPJ(EMPRESA.cnpj)} | IE: ${EMPRESA.ie} | CRT: ${EMPRESA.crt} - ${EMPRESA.regime}</p>
+<p>${EMPRESA.logradouro}, ${EMPRESA.numero} - ${EMPRESA.bairro} - ${EMPRESA.cidade}/${EMPRESA.uf} - CEP ${formatarCEP(EMPRESA.cep)}</p>
+<p>Telefone: ${formatarTelefone(EMPRESA.fone)}</p>
+</div>
+<h2>NFC-e EM ESTRUTURA DE TESTE</h2>
+<p><strong>Número:</strong> ${nota.numero} | <strong>Série:</strong> ${nota.serie} | <strong>Data:</strong> ${nota.dataEmissaoBR}</p>
+<p><strong>ID interno:</strong> ${nota.id}</p>
+<p><strong>Cliente:</strong> ${nota.cliente && nota.cliente.cpf ? nota.cliente.nome + " - CPF " + nota.cliente.cpf : "CONSUMIDOR NAO IDENTIFICADO"}</p>
+<div class="box">
+<table><thead><tr><th>#</th><th>Produto</th><th>UN</th><th class="t-right">Qtd</th><th class="t-right">Vl Unit</th><th class="t-right">Total</th></tr></thead><tbody>${linhas}</tbody></table>
+</div>
+<div class="box">
+<p class="t-right"><strong>Subtotal:</strong> R$ ${dinheiro(nota.subtotal)}</p>
+<p class="t-right"><strong>Desconto:</strong> R$ ${dinheiro(nota.desconto)}</p>
+<p class="t-right total">TOTAL: R$ ${dinheiro(nota.total)}</p>
+<p class="t-right"><strong>Pagamento:</strong> ${nota.pagamento.tipo} - R$ ${dinheiro(nota.pagamento.valor)}</p>
+</div>
+<div class="box">
+<p><strong>Status:</strong> ${nota.status}</p>
+<p><strong>Chave (pré-estrutura):</strong> ${nota.chave}</p>
+<p><strong>Ambiente:</strong> HOMOLOGAÇÃO / ESTRUTURA</p>
+<p><strong>Observação:</strong> pendente apenas certificado A1 e conexão com SEFAZ.</p>
+</div>
+</div></body></html>`;
 }
 
 function gerarXML(nota) {

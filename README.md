@@ -1,13 +1,21 @@
 # Bela Caixa API
 
-Versão com cupom térmico para impressão.
+Estrutura de NFC-e da Bela Modas pronta.
 
-## Recursos
-- NFC-e em estrutura de teste
-- Cupom em layout térmico 80mm
-- XML individual
-- XML do mês
-- XML por período
+## Status atual
+- Cupom visual estruturado
+- XML estruturado
+- Exportação de XML por mês
+- Exportação de XML por período
+
+## Rotas úteis
+- GET /health
+- POST /nfce/emitir
+- GET /nfce/:id/pdf
+- GET /nfce/:id/xml
+- GET /nfce/xml/mes/AAAA-MM
+- GET /nfce/xml/periodo?inicio=AAAA-MM-DD&fim=AAAA-MM-DD
+- GET /nfce/lista
 
 ## Pendências
 - certificado A1
