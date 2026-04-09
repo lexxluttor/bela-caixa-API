@@ -159,19 +159,19 @@ async function carregarSequencial() {
 // ================= NORMALIZAR VENDA =================
 
 function obterProdutoFiscal(item = {}) {
-  const qtd = Number(item.quantidade || item.qtd || 1);
-  const valorUnitario = Number(item.valorUnitario || item.preco || item.valor || 0);
-  const valorTotal = Number(item.valorTotal || (qtd * valorUnitario));
+  const qtd = Number(item.qtd ?? item.quantidade ?? item.qty ?? 1);
+  const valorUnitario = Number(item.valorUnitario ?? item.preco ?? item.valor ?? 0);
+  const valorTotal = Number(item.valorTotal ?? (qtd * valorUnitario));
 
   return {
-    codigo: String(item.codigo || item.cod || item.id || ""),
+    codigo: String(item.cod || item.codigo || item.ref || item.id || ""),
+    ean: String(item.ean || item.codigo_barras || item.codBarras || item.codigoDeBarras || ""),
     descricao: String(item.descricao || item.nome || item.desc || "PRODUTO"),
     ncm: String(item.ncm || "00000000"),
     cfop: String(item.cfop || "5102"),
     csosn: String(item.csosn || "102"),
     unidade: String(item.unidade || "UN"),
     origem: String(item.origem || "0"),
-    ean: String(item.ean || ""),
     quantidade: qtd,
     valorUnitario,
     valorTotal
@@ -187,7 +187,6 @@ function normalizarPayload(body = {}) {
   );
 
   const desconto = Number(body.desconto || 0);
-
   const totalCalculado = subtotal - desconto;
 
   const total = body.total != null
@@ -402,15 +401,18 @@ function makeZip(files) {
 // ================= HTML CUPOM =================
 
 function gerarHTML(nota) {
-  const itens = (nota.itens || []).map((item) => `
+  const itens = (nota.itens || []).map((item) => {
+    const codigoExibido = item.ean || item.codigo || "-";
+    return `
 <tr>
-  <td>${esc(item.codigo || "-")}</td>
+  <td>${esc(codigoExibido)}</td>
   <td>${esc(item.descricao)}</td>
   <td style="text-align:center">${item.quantidade}</td>
   <td style="text-align:right">${moeda(item.valorUnitario)}</td>
   <td style="text-align:right">${moeda(item.valorTotal)}</td>
 </tr>
-`).join("");
+`;
+  }).join("");
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -471,12 +473,8 @@ button{
   font-size:12px;
 }
 @media print{
-  body{
-    padding:0;
-  }
-  .btns{
-    display:none;
-  }
+  body{ padding:0; }
+  .btns{ display:none; }
 }
 </style>
 </head>
@@ -507,7 +505,7 @@ button{
   <table>
     <thead>
       <tr>
-        <th>Cód</th>
+        <th>Cód barras</th>
         <th>Descrição</th>
         <th>Qtd</th>
         <th style="text-align:right">Unit</th>
@@ -521,7 +519,7 @@ button{
 
   <div class="sep"></div>
 
-  Qtd itens: ${(nota.itens || []).length}<br>
+  Qtd itens: ${(nota.itens || []).reduce((s, item) => s + Number(item.quantidade || 0), 0)}<br>
   Subtotal: R$ ${moeda(nota.subtotal || 0)}<br>
   Desconto: R$ ${moeda(nota.desconto || 0)}<br>
 
@@ -581,7 +579,6 @@ app.get("/empresa", (req, res) => {
   res.json(EMPRESA);
 });
 
-// emitir nota - compatível com o index atual
 app.post("/nfce/emitir", async (req, res) => {
   try {
     const venda = normalizarPayload(req.body);
