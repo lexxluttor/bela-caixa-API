@@ -1,6 +1,5 @@
 import express from "express";
 import cors from "cors";
-import { randomUUID } from "crypto";
 import zlib from "zlib";
 import fs from "fs";
 import fsp from "fs/promises";
@@ -181,10 +180,23 @@ function obterProdutoFiscal(item = {}) {
 
 function normalizarPayload(body = {}) {
   const itens = (Array.isArray(body.itens) ? body.itens : []).map(obterProdutoFiscal);
-  const subtotal = itens.reduce((s, i) => s + Number(i.valorTotal || 0), 0);
+
+  const subtotal = itens.reduce(
+    (s, i) => s + Number(i.valorTotal || (i.quantidade * i.valorUnitario) || 0),
+    0
+  );
+
   const desconto = Number(body.desconto || 0);
-  const total = Number(body.total || (subtotal - desconto));
-  const pagamentoValor = Number((body.pagamento && body.pagamento.valor) || total);
+
+  const totalCalculado = subtotal - desconto;
+
+  const total = body.total != null
+    ? Number(body.total)
+    : totalCalculado;
+
+  const pagamentoValor = body.pagamento?.valor != null
+    ? Number(body.pagamento.valor)
+    : total;
 
   return {
     vendaId: String(body.vendaId || body.id || `nfce-${Date.now()}`),
@@ -391,12 +403,14 @@ function makeZip(files) {
 
 function gerarHTML(nota) {
   const itens = (nota.itens || []).map((item) => `
-    <div style="padding:6px 0;border-bottom:1px dotted #bbb;">
-      <div style="font-size:13px;font-weight:700;">${esc(item.descricao)}</div>
-      <div style="font-size:11px;color:#555;">${esc(item.unidade)} ${item.quantidade} x R$ ${moeda(item.valorUnitario)}</div>
-      <div style="font-size:12px;font-weight:700;">R$ ${moeda(item.valorTotal)}</div>
-    </div>
-  `).join("");
+<tr>
+  <td>${esc(item.codigo || "-")}</td>
+  <td>${esc(item.descricao)}</td>
+  <td style="text-align:center">${item.quantidade}</td>
+  <td style="text-align:right">${moeda(item.valorUnitario)}</td>
+  <td style="text-align:right">${moeda(item.valorTotal)}</td>
+</tr>
+`).join("");
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -404,53 +418,136 @@ function gerarHTML(nota) {
 <meta charset="UTF-8">
 <title>NFC-e ${nota.numero}</title>
 <style>
-  body{font-family:Arial,Helvetica,sans-serif;background:#fff;color:#111;padding:16px;}
-  .sheet{max-width:380px;margin:0 auto;border:1px solid #ddd;padding:14px;}
-  .center{text-align:center;}
-  .sep{border-top:1px dashed #000;margin:10px 0;}
-  .btns{margin-top:16px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
-  button{padding:8px 12px;border:none;border-radius:8px;background:#1a5276;color:#fff;cursor:pointer;font-weight:700}
-  @media print{.btns{display:none}}
+body{
+  font-family: monospace;
+  background:#fff;
+  margin:0;
+  padding:10px;
+  color:#000;
+}
+.cupom{
+  width:300px;
+  margin:auto;
+  font-size:12px;
+}
+.center{
+  text-align:center;
+}
+.sep{
+  border-top:1px dashed #000;
+  margin:6px 0;
+}
+table{
+  width:100%;
+  border-collapse:collapse;
+  font-size:11px;
+}
+th{
+  text-align:left;
+  border-bottom:1px solid #000;
+  padding-bottom:3px;
+}
+td{
+  padding:2px 0;
+  vertical-align:top;
+}
+.total{
+  font-size:14px;
+  font-weight:bold;
+}
+.btns{
+  margin-top:10px;
+  display:flex;
+  gap:6px;
+  justify-content:center;
+}
+button{
+  padding:6px 10px;
+  border:none;
+  background:#000;
+  color:#fff;
+  border-radius:6px;
+  cursor:pointer;
+  font-size:12px;
+}
+@media print{
+  body{
+    padding:0;
+  }
+  .btns{
+    display:none;
+  }
+}
 </style>
 </head>
 <body>
-  <div class="sheet">
-    <div class="center">
-      <h2 style="margin:0 0 6px 0;">${esc(EMPRESA.nome_fantasia)}</h2>
-      <div>${esc(EMPRESA.razao_social)}</div>
-      <div>CNPJ: ${formatarCNPJ(EMPRESA.cnpj)}</div>
-      <div>IE: ${esc(EMPRESA.ie)}</div>
-      <div>${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)}</div>
-      <div>${esc(EMPRESA.bairro)} - ${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)}</div>
-      <div>CEP ${formatarCEP(EMPRESA.cep)} - Tel: ${formatarTelefone(EMPRESA.fone)}</div>
-    </div>
+<div class="cupom">
 
-    <div class="sep"></div>
-    <div><strong>Número:</strong> ${nota.numero}</div>
-    <div><strong>Série:</strong> ${nota.serie || 1}</div>
-    <div><strong>Data:</strong> ${esc(nota.dataEmissaoBR || agoraBR())}</div>
-    <div><strong>ID:</strong> ${esc(nota.id)}</div>
-    <div><strong>Cliente:</strong> ${esc(nota.cliente?.nome || "CONSUMIDOR NAO IDENTIFICADO")}</div>
-
-    <div class="sep"></div>
-    ${itens || "<div>Sem itens</div>"}
-    <div class="sep"></div>
-
-    <div><strong>Subtotal:</strong> R$ ${moeda(nota.subtotal || nota.total || 0)}</div>
-    <div><strong>Desconto:</strong> R$ ${moeda(nota.desconto || 0)}</div>
-    <div style="font-size:18px;"><strong>Total:</strong> R$ ${moeda(nota.total || 0)}</div>
-    <div><strong>Pagamento:</strong> ${esc(nota.pagamento?.tipo || "DINHEIRO")} - R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}</div>
-
-    <div class="sep"></div>
-    <div><strong>Status:</strong> ${esc(nota.status || "emitida_homologacao")}</div>
-    <div><strong>Chave:</strong> ${esc(nota.chave || nota.id)}</div>
-    <div style="margin-top:8px;font-size:11px;">AMBIENTE DE TESTE / HOMOLOGAÇÃO</div>
+  <div class="center">
+    <strong style="font-size:18px;">${esc(EMPRESA.nome_fantasia)}</strong><br>
+    ${esc(EMPRESA.razao_social)}<br>
+    CNPJ ${formatarCNPJ(EMPRESA.cnpj)}<br>
+    IE ${esc(EMPRESA.ie)}<br>
+    ${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)}<br>
+    ${esc(EMPRESA.bairro)} - ${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)}<br>
+    CEP ${formatarCEP(EMPRESA.cep)}<br>
+    Tel ${formatarTelefone(EMPRESA.fone)}
   </div>
 
-  <div class="btns">
-    <button onclick="window.print()">Imprimir</button>
-    <button onclick="window.close()">Fechar</button>
+  <div class="sep"></div>
+
+  Número: ${nota.numero}<br>
+  Série: ${nota.serie}<br>
+  Data: ${esc(nota.dataEmissaoBR)}<br>
+  ID: ${esc(nota.id)}<br>
+  Cliente: ${esc(nota.cliente?.nome || "Consumidor")}
+
+  <div class="sep"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Cód</th>
+        <th>Descrição</th>
+        <th>Qtd</th>
+        <th style="text-align:right">Unit</th>
+        <th style="text-align:right">Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${itens}
+    </tbody>
+  </table>
+
+  <div class="sep"></div>
+
+  Qtd itens: ${(nota.itens || []).length}<br>
+  Subtotal: R$ ${moeda(nota.subtotal || 0)}<br>
+  Desconto: R$ ${moeda(nota.desconto || 0)}<br>
+
+  <div class="total">
+    TOTAL R$ ${moeda(nota.total || 0)}
   </div>
+
+  Pagamento: ${esc(nota.pagamento?.tipo || "DINHEIRO")}<br>
+  Valor pago: R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}
+
+  <div class="sep"></div>
+
+  Status: ${esc(nota.status || "emitida_homologacao")}<br>
+  Chave: ${esc(nota.chave || nota.id)}<br>
+
+  <div style="margin-top:8px;font-size:11px;">
+    AMBIENTE DE TESTE / HOMOLOGAÇÃO
+  </div>
+
+</div>
+
+<div class="btns">
+  <button onclick="window.print()">Imprimir</button>
+  <button onclick="window.close()">Fechar</button>
+</div>
+
 </body>
 </html>`;
 }
