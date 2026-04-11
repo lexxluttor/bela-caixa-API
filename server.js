@@ -156,6 +156,29 @@ function normalizarMes(ano, mes) {
   return `${a}-${pad2(m)}`;
 }
 
+// ================= FORMA DE PAGAMENTO FISCAL =================
+
+function mapearFormaPagamentoFiscal(tipo = "") {
+  const t = String(tipo || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+
+  if (!t) return "99";
+
+  if (t.includes("PIX")) return "17";
+  if (t.includes("DINHEIRO")) return "01";
+  if (t.includes("DEBITO")) return "04";
+  if (t.includes("CREDITO")) return "03";
+  if (t.includes("CARTAO")) return "03";
+  if (t.includes("BOLETO")) return "15";
+  if (t.includes("CREDIARIO")) return "05";
+  if (t.includes("CREDIÁRIO")) return "05";
+
+  return "99";
+}
+
 // ================= APPS SCRIPT / XML =================
 
 async function obterNumeroNfceRemoto() {
@@ -397,7 +420,7 @@ function gerarXML(nota) {
   </total>
   <pag>
     <detPag>
-      <tPag>${esc(nota.pagamento?.tipo || "DINHEIRO")}</tPag>
+      <tPag>${mapearFormaPagamentoFiscal(nota.pagamento?.tipo)}</tPag>
       <vPag>${dinheiro(nota.pagamento?.valor || nota.total)}</vPag>
     </detPag>
   </pag>
