@@ -143,6 +143,19 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
+function pad2(v) {
+  return String(v).padStart(2, "0");
+}
+
+function normalizarMes(ano, mes) {
+  const a = Number(ano);
+  const m = Number(mes);
+  if (!Number.isInteger(a) || !Number.isInteger(m) || m < 1 || m > 12) {
+    return "";
+  }
+  return `${a}-${pad2(m)}`;
+}
+
 // ================= APPS SCRIPT / XML =================
 
 async function obterNumeroNfceRemoto() {
@@ -653,6 +666,95 @@ button{
 </html>`;
 }
 
+// ================= HELPERS DE EXPORTAÇÃO =================
+
+async function obterArquivosXmlMes(mes) {
+  try {
+    if (API_BELA_SHEETS) {
+      const rows = await listarXmlMesRemoto(mes);
+      if (rows.length) {
+        return rows.map(r => ({
+          name: nomeArquivoXMLRegistro(r),
+          data: String(r.xml || ""),
+          date: r.dataEmissao || new Date().toISOString()
+        }));
+      }
+    }
+  } catch (e) {
+    console.error("⚠ falha ao buscar XML do mês no Apps Script:", e.message);
+  }
+
+  const lista = (await listarNotas()).filter(n => n.mesRef === mes);
+
+  return lista.map(n => ({
+    name: nomeArquivoXML(n),
+    data: gerarXML(n),
+    date: n.dataEmissaoIso || n.data || new Date().toISOString()
+  }));
+}
+
+async function obterArquivosXmlPeriodo(inicio, fim) {
+  try {
+    if (API_BELA_SHEETS) {
+      const rows = await listarXmlPeriodoRemoto(inicio, fim);
+      if (rows.length) {
+        return rows.map(r => ({
+          name: nomeArquivoXMLRegistro(r),
+          data: String(r.xml || ""),
+          date: r.dataEmissao || new Date().toISOString()
+        }));
+      }
+    }
+  } catch (e) {
+    console.error("⚠ falha ao buscar XML do período no Apps Script:", e.message);
+  }
+
+  const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
+  const dFim = fim ? new Date(fim + "T23:59:59") : null;
+
+  const lista = (await listarNotas()).filter(n => {
+    const d = new Date(n.dataEmissaoIso || n.data);
+    if (dIni && d < dIni) return false;
+    if (dFim && d > dFim) return false;
+    return true;
+  });
+
+  return lista.map(n => ({
+    name: nomeArquivoXML(n),
+    data: gerarXML(n),
+    date: n.dataEmissaoIso || n.data || new Date().toISOString()
+  }));
+}
+
+async function responderZipMes(res, mes) {
+  const files = await obterArquivosXmlMes(mes);
+
+  if (!files.length) {
+    return res.status(404).json({ ok: false, error: "Nenhum XML encontrado para este mês." });
+  }
+
+  const zipBuffer = makeZip(files);
+
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${mes}.zip"`);
+  return res.send(zipBuffer);
+}
+
+async function responderZipPeriodo(res, inicio, fim) {
+  const files = await obterArquivosXmlPeriodo(inicio, fim);
+
+  if (!files.length) {
+    return res.status(404).json({ ok: false, error: "Nenhum XML encontrado no período." });
+  }
+
+  const zipBuffer = makeZip(files);
+  const nome = `${inicio || "inicio"}_${fim || "fim"}`.replace(/\//g, "-");
+
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${nome}.zip"`);
+  return res.send(zipBuffer);
+}
+
 // ================= ROTAS =================
 
 app.get("/", (req, res) => {
@@ -812,107 +914,42 @@ app.get("/nfce/:id/pdf", async (req, res) => {
   res.type("html").send(gerarHTML(nota));
 });
 
+// ====== ROTAS ANTIGAS ======
+
 app.get("/nfce/xml/mes/:mes", async (req, res) => {
   const mes = String(req.params.mes || "");
-
-  try {
-    if (API_BELA_SHEETS) {
-      const rows = await listarXmlMesRemoto(mes);
-
-      if (!rows.length) {
-        return res.status(404).json({ ok: false, error: "Nenhum XML encontrado para este mês." });
-      }
-
-      const files = rows.map(r => ({
-        name: nomeArquivoXMLRegistro(r),
-        data: String(r.xml || ""),
-        date: r.dataEmissao || new Date().toISOString()
-      }));
-
-      const zipBuffer = makeZip(files);
-
-      res.setHeader("Content-Type", "application/zip");
-      res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${mes}.zip"`);
-      return res.send(zipBuffer);
-    }
-  } catch (e) {
-    console.error("⚠ falha ao buscar XML do mês no Apps Script:", e.message);
-  }
-
-  const lista = (await listarNotas()).filter(n => n.mesRef === mes);
-
-  if (!lista.length) {
-    return res.status(404).json({ ok: false, error: "Nenhum XML encontrado para este mês." });
-  }
-
-  const files = lista.map(n => ({
-    name: nomeArquivoXML(n),
-    data: gerarXML(n),
-    date: n.dataEmissaoIso || n.data || new Date().toISOString()
-  }));
-
-  const zipBuffer = makeZip(files);
-
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${mes}.zip"`);
-  res.send(zipBuffer);
+  return responderZipMes(res, mes);
 });
 
 app.get("/nfce/xml/periodo", async (req, res) => {
   const inicio = String(req.query.inicio || "");
   const fim = String(req.query.fim || "");
+  return responderZipPeriodo(res, inicio, fim);
+});
 
-  try {
-    if (API_BELA_SHEETS) {
-      const rows = await listarXmlPeriodoRemoto(inicio, fim);
+// ====== ROTAS CURTAS PARA O INDEX ======
 
-      if (!rows.length) {
-        return res.status(404).json({ ok: false, error: "Nenhum XML encontrado no período." });
-      }
+app.get("/xml/mes", async (req, res) => {
+  const ano = String(req.query.ano || "");
+  const mes = String(req.query.mes || "");
+  const mesRef = normalizarMes(ano, mes);
 
-      const files = rows.map(r => ({
-        name: nomeArquivoXMLRegistro(r),
-        data: String(r.xml || ""),
-        date: r.dataEmissao || new Date().toISOString()
-      }));
-
-      const zipBuffer = makeZip(files);
-      const nome = `${inicio || "inicio"}_${fim || "fim"}`.replace(/\//g, "-");
-
-      res.setHeader("Content-Type", "application/zip");
-      res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${nome}.zip"`);
-      return res.send(zipBuffer);
-    }
-  } catch (e) {
-    console.error("⚠ falha ao buscar XML do período no Apps Script:", e.message);
+  if (!mesRef) {
+    return res.status(400).json({ ok: false, error: "Parâmetros ano/mes inválidos." });
   }
 
-  const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
-  const dFim = fim ? new Date(fim + "T23:59:59") : null;
+  return responderZipMes(res, mesRef);
+});
 
-  const lista = (await listarNotas()).filter(n => {
-    const d = new Date(n.dataEmissaoIso || n.data);
-    if (dIni && d < dIni) return false;
-    if (dFim && d > dFim) return false;
-    return true;
-  });
+app.get("/xml/periodo", async (req, res) => {
+  const inicio = String(req.query.inicio || "");
+  const fim = String(req.query.fim || "");
 
-  if (!lista.length) {
-    return res.status(404).json({ ok: false, error: "Nenhum XML encontrado no período." });
+  if (!inicio || !fim) {
+    return res.status(400).json({ ok: false, error: "Informe inicio e fim." });
   }
 
-  const files = lista.map(n => ({
-    name: nomeArquivoXML(n),
-    data: gerarXML(n),
-    date: n.dataEmissaoIso || n.data || new Date().toISOString()
-  }));
-
-  const zipBuffer = makeZip(files);
-  const nome = `${inicio || "inicio"}_${fim || "fim"}`.replace(/\//g, "-");
-
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${nome}.zip"`);
-  res.send(zipBuffer);
+  return responderZipPeriodo(res, inicio, fim);
 });
 
 // ================= START =================
