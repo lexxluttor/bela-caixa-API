@@ -73,6 +73,10 @@ function dataMesRef(iso) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function dataDiaRef(iso) {
+  return String(iso || new Date().toISOString()).substring(0, 10);
+}
+
 function agoraBR() {
   return new Intl.DateTimeFormat("pt-BR", {
     dateStyle: "short",
@@ -126,7 +130,7 @@ function montarUrlAppsScript(action, params = {}) {
 }
 
 async function fetchJson(url, options = {}) {
-  const resp = await fetch(url, options);
+  const resp = await fetch(url);
   const text = await resp.text();
 
   let data = {};
@@ -166,7 +170,6 @@ function mapearFormaPagamentoFiscal(tipo = "") {
     .toUpperCase();
 
   if (!t) return "99";
-
   if (t.includes("PIX")) return "17";
   if (t.includes("DINHEIRO")) return "01";
   if (t.includes("DEBITO")) return "04";
@@ -174,17 +177,14 @@ function mapearFormaPagamentoFiscal(tipo = "") {
   if (t.includes("CARTAO")) return "03";
   if (t.includes("BOLETO")) return "15";
   if (t.includes("CREDIARIO")) return "05";
-  if (t.includes("CREDIÁRIO")) return "05";
 
   return "99";
 }
 
-// ================= APPS SCRIPT / XML =================
+// ================= APPS SCRIPT / XML / NOTAS =================
 
 async function obterNumeroNfceRemoto() {
-  if (!API_BELA_SHEETS) {
-    throw new Error("API_BELA_SHEETS não configurada");
-  }
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
   const url = montarUrlAppsScript("getProximoNumeroNfce");
   const data = await fetchJson(url);
@@ -196,9 +196,7 @@ async function obterNumeroNfceRemoto() {
 }
 
 async function salvarXmlNfceRemoto(nota, xml) {
-  if (!API_BELA_SHEETS) {
-    throw new Error("API_BELA_SHEETS não configurada");
-  }
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
   const payload = {
     action: "salvarNfceXml",
@@ -207,23 +205,43 @@ async function salvarXmlNfceRemoto(nota, xml) {
     numero: nota.numero,
     serie: nota.serie,
     dataEmissao: nota.dataEmissaoIso,
+    dataEmissaoBR: nota.dataEmissaoBR || "",
     cliente: nota.cliente?.nome || "",
     cpf: nota.cliente?.cpf || "",
     total: nota.total || 0,
+    status: nota.status || "emitida_homologacao",
+    chave: nota.chave || nota.id,
+    pagamentoTipo: nota.pagamento?.tipo || "",
+    pdfUrl: nota.pdf_url || "",
+    xmlUrl: nota.xml_url || "",
+    notaJson: JSON.stringify(nota),
     xml
   };
 
-  return await fetchJson(API_BELA_SHEETS, {
+  const resp = await fetch(API_BELA_SHEETS, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
+
+  const text = await resp.text();
+  let data = {};
+
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error("Resposta inválida do Apps Script");
+  }
+
+  if (!resp.ok || data.ok === false) {
+    throw new Error(data.error || `Falha HTTP ${resp.status}`);
+  }
+
+  return data;
 }
 
 async function listarXmlMesRemoto(mes) {
-  if (!API_BELA_SHEETS) {
-    throw new Error("API_BELA_SHEETS não configurada");
-  }
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
   const url = montarUrlAppsScript("listarNfceXmlMes", { mes });
   const data = await fetchJson(url);
@@ -231,16 +249,30 @@ async function listarXmlMesRemoto(mes) {
 }
 
 async function listarXmlPeriodoRemoto(inicio, fim) {
-  if (!API_BELA_SHEETS) {
-    throw new Error("API_BELA_SHEETS não configurada");
-  }
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
   const url = montarUrlAppsScript("listarNfceXmlPeriodo", { inicio, fim });
   const data = await fetchJson(url);
   return Array.isArray(data.rows) ? data.rows : [];
 }
 
-// ================= STORAGE =================
+async function getNfceNotaRemota(id) {
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
+
+  const url = montarUrlAppsScript("getNfceNota", { id });
+  const data = await fetchJson(url);
+  return data.nota || null;
+}
+
+async function listarNfceNotasRemotas({ dia = "", mes = "" } = {}) {
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
+
+  const url = montarUrlAppsScript("listarNfceNotas", { dia, mes });
+  const data = await fetchJson(url);
+  return Array.isArray(data.rows) ? data.rows : [];
+}
+
+// ================= STORAGE LOCAL =================
 
 async function ensureDirs() {
   await fsp.mkdir(NOTAS_DIR, { recursive: true });
@@ -255,7 +287,7 @@ async function salvarNota(nota) {
   await fsp.writeFile(caminhoNota(nota.id), JSON.stringify(nota, null, 2), "utf-8");
 }
 
-async function lerNota(id) {
+async function lerNotaLocal(id) {
   try {
     const raw = await fsp.readFile(caminhoNota(id), "utf-8");
     return JSON.parse(raw);
@@ -264,7 +296,7 @@ async function lerNota(id) {
   }
 }
 
-async function listarNotas() {
+async function listarNotasLocal() {
   await ensureDirs();
 
   const arquivos = await fsp.readdir(NOTAS_DIR);
@@ -284,7 +316,7 @@ async function listarNotas() {
 }
 
 async function carregarSequencial() {
-  const notas = await listarNotas();
+  const notas = await listarNotasLocal();
   const max = notas.reduce((m, n) => Math.max(m, Number(n.numero || 0)), 0);
   sequencial = max + 1;
 }
@@ -322,13 +354,8 @@ function normalizarPayload(body = {}) {
   const desconto = Number(body.desconto || 0);
   const totalCalculado = subtotal - desconto;
 
-  const total = body.total != null
-    ? Number(body.total)
-    : totalCalculado;
-
-  const pagamentoValor = body.pagamento?.valor != null
-    ? Number(body.pagamento.valor)
-    : total;
+  const total = body.total != null ? Number(body.total) : totalCalculado;
+  const pagamentoValor = body.pagamento?.valor != null ? Number(body.pagamento.valor) : total;
 
   return {
     vendaId: String(body.vendaId || body.id || `nfce-${Date.now()}`),
@@ -707,7 +734,7 @@ async function obterArquivosXmlMes(mes) {
     console.error("⚠ falha ao buscar XML do mês no Apps Script:", e.message);
   }
 
-  const lista = (await listarNotas()).filter(n => n.mesRef === mes);
+  const lista = (await listarNotasLocal()).filter(n => n.mesRef === mes);
 
   return lista.map(n => ({
     name: nomeArquivoXML(n),
@@ -735,7 +762,7 @@ async function obterArquivosXmlPeriodo(inicio, fim) {
   const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
   const dFim = fim ? new Date(fim + "T23:59:59") : null;
 
-  const lista = (await listarNotas()).filter(n => {
+  const lista = (await listarNotasLocal()).filter(n => {
     const d = new Date(n.dataEmissaoIso || n.data);
     if (dIni && d < dIni) return false;
     if (dFim && d > dFim) return false;
@@ -785,8 +812,6 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", async (req, res) => {
-  const notas = await listarNotas();
-
   let remoto = null;
   if (API_BELA_SHEETS) {
     try {
@@ -796,10 +821,21 @@ app.get("/health", async (req, res) => {
     }
   }
 
+  let totalRemoto = null;
+  try {
+    const notasRemotas = API_BELA_SHEETS ? await listarNfceNotasRemotas({}) : [];
+    totalRemoto = notasRemotas.length;
+  } catch {
+    totalRemoto = null;
+  }
+
+  const notasLocal = await listarNotasLocal();
+
   res.json({
     status: "ok",
     empresa: EMPRESA.nome_fantasia,
-    total_notas: notas.length,
+    total_notas_local: notasLocal.length,
+    total_notas_remoto: totalRemoto,
     proximo_numero_local: sequencial,
     proximo_numero_remoto: remoto?.numero ?? null,
     serie_remota: remoto?.serie ?? null,
@@ -830,9 +866,7 @@ app.post("/nfce/emitir", async (req, res) => {
     let numeracaoOrigem = "local";
 
     try {
-      if (!API_BELA_SHEETS) {
-        throw new Error("API_BELA_SHEETS não configurada");
-      }
+      if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
       const remoto = await obterNumeroNfceRemoto();
       numero = remoto.numero;
       serie = remoto.serie;
@@ -853,6 +887,7 @@ app.post("/nfce/emitir", async (req, res) => {
       dataEmissaoIso,
       dataEmissaoBR: agoraBR(),
       mesRef: dataMesRef(dataEmissaoIso),
+      diaRef: dataDiaRef(dataEmissaoIso),
       status: "emitida_homologacao",
       chave: id
     };
@@ -868,14 +903,12 @@ app.post("/nfce/emitir", async (req, res) => {
     let erroAppsScript = null;
 
     try {
-      if (!API_BELA_SHEETS) {
-        throw new Error("API_BELA_SHEETS não configurada");
-      }
+      if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
       await salvarXmlNfceRemoto(nota, xml);
       xmlSalvoNoAppsScript = true;
     } catch (e) {
       erroAppsScript = e.message;
-      console.error("⚠ falha ao salvar XML no Apps Script:", e.message);
+      console.error("⚠ falha ao salvar XML/nota no Apps Script:", e.message);
     }
 
     res.json({
@@ -903,8 +936,20 @@ app.post("/nfce/emitir", async (req, res) => {
 });
 
 app.get("/nfce/lista", async (req, res) => {
-  const notas = await listarNotas();
-  const notasResumo = notas.map(n => ({
+  const dia = String(req.query.dia || "");
+  const mes = String(req.query.mes || "");
+
+  try {
+    if (API_BELA_SHEETS) {
+      const notas = await listarNfceNotasRemotas({ dia, mes });
+      return res.json({ ok: true, total: notas.length, notas });
+    }
+  } catch (e) {
+    console.error("⚠ falha ao listar notas remotas:", e.message);
+  }
+
+  const notasLocal = await listarNotasLocal();
+  const notasResumo = notasLocal.map(n => ({
     id: n.id,
     numero: n.numero,
     serie: n.serie,
@@ -914,25 +959,40 @@ app.get("/nfce/lista", async (req, res) => {
     status: n.status,
     xml_url: n.xml_url,
     pdf_url: n.pdf_url,
-    mesRef: n.mesRef
+    mesRef: n.mesRef,
+    diaRef: n.diaRef || dataDiaRef(n.dataEmissaoIso || n.data || "")
   }));
-  res.json({ ok: true, total: notasResumo.length, notas: notasResumo });
+
+  return res.json({ ok: true, total: notasResumo.length, notas: notasResumo });
 });
 
+async function lerNotaCompleta(id) {
+  try {
+    if (API_BELA_SHEETS) {
+      const notaRemota = await getNfceNotaRemota(id);
+      if (notaRemota) return notaRemota;
+    }
+  } catch (e) {
+    console.error("⚠ falha ao ler nota remota:", e.message);
+  }
+
+  return await lerNotaLocal(id);
+}
+
 app.get("/nfce/:id", async (req, res) => {
-  const nota = await lerNota(req.params.id);
+  const nota = await lerNotaCompleta(req.params.id);
   if (!nota) return res.status(404).json({ ok: false, error: "Nota não encontrada." });
   res.json({ ok: true, nfce: nota });
 });
 
 app.get("/nfce/:id/xml", async (req, res) => {
-  const nota = await lerNota(req.params.id);
+  const nota = await lerNotaCompleta(req.params.id);
   if (!nota) return res.status(404).type("text/xml").send("<erro>Nota não encontrada</erro>");
   res.type("text/xml").send(gerarXML(nota));
 });
 
 app.get("/nfce/:id/pdf", async (req, res) => {
-  const nota = await lerNota(req.params.id);
+  const nota = await lerNotaCompleta(req.params.id);
   if (!nota) return res.status(404).send("nota nao encontrada");
   res.type("html").send(gerarHTML(nota));
 });
