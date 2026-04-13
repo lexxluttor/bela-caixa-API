@@ -130,7 +130,7 @@ function montarUrlAppsScript(action, params = {}) {
 }
 
 async function fetchJson(url, options = {}) {
-  const resp = await fetch(url);
+  const resp = await fetch(url, options);
   const text = await resp.text();
 
   let data = {};
@@ -218,26 +218,11 @@ async function salvarXmlNfceRemoto(nota, xml) {
     xml
   };
 
-  const resp = await fetch(API_BELA_SHEETS, {
+  return await fetchJson(API_BELA_SHEETS, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
-
-  const text = await resp.text();
-  let data = {};
-
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    throw new Error("Resposta inválida do Apps Script");
-  }
-
-  if (!resp.ok || data.ok === false) {
-    throw new Error(data.error || `Falha HTTP ${resp.status}`);
-  }
-
-  return data;
 }
 
 async function listarXmlMesRemoto(mes) {
@@ -719,61 +704,136 @@ button{
 // ================= HELPERS DE EXPORTAÇÃO =================
 
 async function obterArquivosXmlMes(mes) {
+  let arquivos = [];
+
+  // 1) tenta XML completo salvo
   try {
     if (API_BELA_SHEETS) {
       const rows = await listarXmlMesRemoto(mes);
-      if (rows.length) {
-        return rows.map(r => ({
+      arquivos = rows
+        .filter(r => String(r.xml || "").trim() !== "")
+        .map(r => ({
           name: nomeArquivoXMLRegistro(r),
-          data: String(r.xml || ""),
+          data: String(r.xml),
           date: r.dataEmissao || new Date().toISOString()
         }));
-      }
     }
   } catch (e) {
     console.error("⚠ falha ao buscar XML do mês no Apps Script:", e.message);
   }
 
-  const lista = (await listarNotasLocal()).filter(n => n.mesRef === mes);
+  // 2) fallback remoto: recria XML a partir de nfce_notas
+  try {
+    if (API_BELA_SHEETS) {
+      const notas = await listarNfceNotasRemotas({ mes });
+      const existentes = new Set(arquivos.map(a => a.name));
 
-  return lista.map(n => ({
-    name: nomeArquivoXML(n),
-    data: gerarXML(n),
-    date: n.dataEmissaoIso || n.data || new Date().toISOString()
-  }));
+      for (const n of notas) {
+        const id = n.id;
+        if (!id) continue;
+
+        const notaCompleta = await getNfceNotaRemota(id);
+        if (!notaCompleta) continue;
+
+        const nome = nomeArquivoXML(notaCompleta);
+        if (existentes.has(nome)) continue;
+
+        arquivos.push({
+          name: nome,
+          data: gerarXML(notaCompleta),
+          date: notaCompleta.dataEmissaoIso || notaCompleta.data || new Date().toISOString()
+        });
+        existentes.add(nome);
+      }
+    }
+  } catch (e) {
+    console.error("⚠ falha ao recriar XML do mês via nfce_notas:", e.message);
+  }
+
+  // 3) último fallback local
+  if (!arquivos.length) {
+    const lista = (await listarNotasLocal()).filter(n => n.mesRef === mes);
+
+    arquivos = lista.map(n => ({
+      name: nomeArquivoXML(n),
+      data: gerarXML(n),
+      date: n.dataEmissaoIso || n.data || new Date().toISOString()
+    }));
+  }
+
+  return arquivos;
 }
 
 async function obterArquivosXmlPeriodo(inicio, fim) {
+  let arquivos = [];
+
+  // 1) tenta XML completo salvo
   try {
     if (API_BELA_SHEETS) {
       const rows = await listarXmlPeriodoRemoto(inicio, fim);
-      if (rows.length) {
-        return rows.map(r => ({
+      arquivos = rows
+        .filter(r => String(r.xml || "").trim() !== "")
+        .map(r => ({
           name: nomeArquivoXMLRegistro(r),
-          data: String(r.xml || ""),
+          data: String(r.xml),
           date: r.dataEmissao || new Date().toISOString()
         }));
-      }
     }
   } catch (e) {
     console.error("⚠ falha ao buscar XML do período no Apps Script:", e.message);
   }
 
-  const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
-  const dFim = fim ? new Date(fim + "T23:59:59") : null;
+  // 2) fallback remoto: recria XML a partir de nfce_notas
+  try {
+    if (API_BELA_SHEETS) {
+      const notas = await listarNfceNotasRemotas({});
+      const existentes = new Set(arquivos.map(a => a.name));
+      const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
+      const dFim = fim ? new Date(fim + "T23:59:59") : null;
 
-  const lista = (await listarNotasLocal()).filter(n => {
-    const d = new Date(n.dataEmissaoIso || n.data);
-    if (dIni && d < dIni) return false;
-    if (dFim && d > dFim) return false;
-    return true;
-  });
+      for (const n of notas) {
+        const notaDate = new Date(n.data || "");
+        if (dIni && notaDate < dIni) continue;
+        if (dFim && notaDate > dFim) continue;
 
-  return lista.map(n => ({
-    name: nomeArquivoXML(n),
-    data: gerarXML(n),
-    date: n.dataEmissaoIso || n.data || new Date().toISOString()
-  }));
+        const notaCompleta = await getNfceNotaRemota(n.id);
+        if (!notaCompleta) continue;
+
+        const nome = nomeArquivoXML(notaCompleta);
+        if (existentes.has(nome)) continue;
+
+        arquivos.push({
+          name: nome,
+          data: gerarXML(notaCompleta),
+          date: notaCompleta.dataEmissaoIso || notaCompleta.data || new Date().toISOString()
+        });
+        existentes.add(nome);
+      }
+    }
+  } catch (e) {
+    console.error("⚠ falha ao recriar XML do período via nfce_notas:", e.message);
+  }
+
+  // 3) último fallback local
+  if (!arquivos.length) {
+    const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
+    const dFim = fim ? new Date(fim + "T23:59:59") : null;
+
+    const lista = (await listarNotasLocal()).filter(n => {
+      const d = new Date(n.dataEmissaoIso || n.data);
+      if (dIni && d < dIni) return false;
+      if (dFim && d > dFim) return false;
+      return true;
+    });
+
+    arquivos = lista.map(n => ({
+      name: nomeArquivoXML(n),
+      data: gerarXML(n),
+      date: n.dataEmissaoIso || n.data || new Date().toISOString()
+    }));
+  }
+
+  return arquivos;
 }
 
 async function responderZipMes(res, mes) {
