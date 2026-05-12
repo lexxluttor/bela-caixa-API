@@ -11,6 +11,7 @@ app.use(express.json({ limit: "2mb" }));
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || "https://bela-caixa-api.onrender.com";
+const LOGO_URL = process.env.LOGO_URL || "";
 const API_BELA_SHEETS = process.env.API_BELA_SHEETS || "";
 
 const DATA_DIR = path.resolve("./storage");
@@ -552,155 +553,340 @@ function makeZip(files) {
 // ================= HTML CUPOM =================
 
 function gerarHTML(nota) {
-  const itens = (nota.itens || []).map((item) => {
-    const codigoExibido = item.ean || item.codigo || "-";
+  const dataIso = nota.dataEmissaoIso || nota.data || new Date().toISOString();
+  const dataObj = new Date(dataIso);
+  const dataBR = nota.dataEmissaoBR || new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "medium",
+    timeZone: "America/Sao_Paulo"
+  }).format(dataObj);
+
+  const itens = (nota.itens || []).map((item, idx) => {
+    const codigoExibido = item.ean || item.codigo || String(idx + 1);
     return `
 <tr>
-  <td>${esc(codigoExibido)}</td>
-  <td>${esc(item.descricao)}</td>
-  <td style="text-align:center">${item.quantidade}</td>
-  <td style="text-align:right">${moeda(item.valorUnitario)}</td>
-  <td style="text-align:right">${moeda(item.valorTotal)}</td>
-</tr>
-`;
+  <td class="codigo">${esc(codigoExibido)}</td>
+  <td class="descricao">
+    <strong>${esc(item.descricao || "PRODUTO")}</strong>
+  </td>
+  <td class="center">${moeda(item.quantidade || 1).replace(",00", "")}</td>
+  <td class="center">${esc(item.unidade || "UN")}</td>
+  <td class="right">${moeda(item.valorUnitario || 0)}</td>
+  <td class="right">${moeda(item.valorTotal || 0)}</td>
+</tr>`;
   }).join("");
+
+  const qtdItens = (nota.itens || []).reduce((s, item) => s + Number(item.quantidade || 0), 0);
+  const forma = String(nota.pagamento?.tipo || "DINHEIRO").replace(/_/g, " ").toUpperCase();
+  const ambiente = String(nota.status || "emitida_homologacao").toLowerCase().includes("homologacao") ? "HOMOLOGAÇÃO" : "PRODUÇÃO";
+  const statusExibido = String(nota.status || "emitida").replace(/_/g, " ").toUpperCase();
+  const chave = String(nota.chave || nota.id || "").toUpperCase();
+  const logoHtml = LOGO_URL
+    ? `<img src="${esc(LOGO_URL)}" alt="Logo Bela Modas" class="logo-img">`
+    : `<div class="logo-text">BELA<br><span>MODAS</span></div>`;
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<title>NFC-e ${nota.numero}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NFC-e ${esc(nota.numero || "")}</title>
 <style>
+*{ box-sizing:border-box; }
 body{
-  font-family: monospace;
-  background:#fff;
   margin:0;
-  padding:10px;
-  color:#000;
+  padding:16px;
+  background:#f3f3f3;
+  color:#111;
+  font-family: Arial, Helvetica, sans-serif;
 }
 .cupom{
-  width:300px;
-  margin:auto;
-  font-size:12px;
+  width:780px;
+  max-width:100%;
+  margin:0 auto;
+  background:#fff;
+  border:1px solid #ddd;
+  padding:18px;
+  box-shadow:0 2px 10px rgba(0,0,0,.08);
 }
-.center{
+.header{
+  display:grid;
+  grid-template-columns:150px 1fr 180px;
+  gap:14px;
+  align-items:center;
+  border-bottom:3px solid #111;
+  padding-bottom:14px;
+}
+.logo-box{ text-align:center; }
+.logo-img{ max-width:130px; max-height:105px; object-fit:contain; }
+.logo-text{ font-size:42px; line-height:.88; font-family: Georgia, serif; letter-spacing:2px; }
+.logo-text span{ font-size:18px; letter-spacing:6px; }
+.empresa{ text-align:center; line-height:1.35; }
+.empresa h1{ margin:0 0 4px; font-size:30px; letter-spacing:.5px; }
+.empresa strong{ font-size:18px; }
+.box-nfce{
+  border-left:1px solid #333;
   text-align:center;
+  padding-left:14px;
 }
-.sep{
-  border-top:1px dashed #000;
-  margin:6px 0;
+.box-nfce h2{ margin:0; font-size:26px; }
+.box-nfce .numero{ font-size:34px; font-weight:800; margin:8px 0; }
+.box-nfce div{ margin:4px 0; }
+.section-title{
+  margin:14px 0 10px;
+  padding:5px 8px;
+  text-align:center;
+  font-weight:800;
+  background:#111;
+  color:#fff;
+  letter-spacing:.3px;
 }
+.grid-info{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:14px;
+}
+.info-line{ margin:8px 0; font-size:15px; }
+.info-line b{ display:inline-block; min-width:95px; }
+.card{
+  border:1px solid #bbb;
+  border-radius:8px;
+  padding:12px;
+  background:#fff;
+}
+.card h3{ margin:0 0 8px; font-size:16px; text-align:center; }
 table{
   width:100%;
   border-collapse:collapse;
-  font-size:11px;
+  font-size:14px;
 }
 th{
+  background:#111;
+  color:#fff;
+  padding:8px;
   text-align:left;
-  border-bottom:1px solid #000;
-  padding-bottom:3px;
+  font-size:13px;
 }
 td{
-  padding:2px 0;
+  border-bottom:1px solid #ddd;
+  padding:8px;
   vertical-align:top;
 }
-.total{
-  font-size:14px;
-  font-weight:bold;
+.codigo{ width:135px; word-break:break-word; }
+.descricao{ width:auto; }
+.center{ text-align:center; }
+.right{ text-align:right; }
+.resumo{
+  display:grid;
+  grid-template-columns:1fr 280px;
+  gap:18px;
+  margin-top:12px;
+  align-items:start;
 }
-.btns{
-  margin-top:10px;
+.totais{ margin-left:auto; width:100%; font-size:16px; }
+.totais .linha{ display:flex; justify-content:space-between; padding:6px 0; }
+.totais .total{
+  margin-top:6px;
+  padding:10px;
+  background:#f1f1f1;
+  font-size:22px;
+  font-weight:800;
+  border-radius:6px;
+}
+.pagamento{
+  display:grid;
+  grid-template-columns:1fr 260px;
+  gap:18px;
+  align-items:center;
+  border-top:2px solid #111;
+  border-bottom:2px solid #111;
+  padding:14px 0;
+  margin-top:14px;
+}
+.valor-pago{
+  border:1px solid #777;
+  border-radius:8px;
+  padding:12px;
+  text-align:center;
+  font-size:24px;
+  font-weight:800;
+}
+.valor-pago span{ display:block; font-size:13px; margin-bottom:6px; }
+.msg{
+  margin:14px 0;
+  border:1px solid #bbb;
+  border-radius:8px;
+  padding:12px;
+  text-align:center;
+  font-weight:800;
+}
+.rodape{
+  border-top:2px solid #111;
+  margin-top:14px;
+  padding-top:12px;
+  display:grid;
+  grid-template-columns:150px 1fr 150px;
+  gap:16px;
+  align-items:center;
+  font-size:13px;
+}
+.qr-placeholder{
+  width:120px;
+  height:120px;
+  border:2px solid #111;
   display:flex;
-  gap:6px;
+  align-items:center;
   justify-content:center;
+  font-weight:800;
+  font-size:13px;
+  text-align:center;
+  margin:auto;
+}
+.chave{
+  margin-top:6px;
+  padding:8px;
+  background:#f1f1f1;
+  border-radius:6px;
+  word-break:break-all;
+  font-weight:700;
+}
+.small{ font-size:12px; }
+.botoes{
+  width:780px;
+  max-width:100%;
+  margin:12px auto 0;
+  display:flex;
+  justify-content:center;
+  gap:8px;
 }
 button{
-  padding:6px 10px;
   border:none;
-  background:#000;
+  background:#111;
   color:#fff;
-  border-radius:6px;
+  border-radius:8px;
+  padding:10px 18px;
   cursor:pointer;
-  font-size:12px;
+  font-size:14px;
+  font-weight:700;
 }
 @media print{
-  body{ padding:0; }
-  .btns{ display:none; }
+  body{ background:#fff; padding:0; }
+  .cupom{ width:100%; border:none; box-shadow:none; padding:10mm; }
+  .botoes{ display:none; }
+}
+@media (max-width:700px){
+  .header{ grid-template-columns:1fr; text-align:center; }
+  .box-nfce{ border-left:none; border-top:1px solid #333; padding-left:0; padding-top:10px; }
+  .grid-info,.resumo,.pagamento,.rodape{ grid-template-columns:1fr; }
+  table{ font-size:12px; }
+  th,td{ padding:6px; }
 }
 </style>
 </head>
 <body>
 <div class="cupom">
-
-  <div class="center">
-    <strong style="font-size:18px;">${esc(EMPRESA.nome_fantasia)}</strong><br>
-    ${esc(EMPRESA.razao_social)}<br>
-    CNPJ ${formatarCNPJ(EMPRESA.cnpj)}<br>
-    IE ${esc(EMPRESA.ie)}<br>
-    ${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)}<br>
-    ${esc(EMPRESA.bairro)} - ${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)}<br>
-    CEP ${formatarCEP(EMPRESA.cep)}<br>
-    Tel ${formatarTelefone(EMPRESA.fone)}
+  <div class="header">
+    <div class="logo-box">${logoHtml}</div>
+    <div class="empresa">
+      <h1>${esc(EMPRESA.nome_fantasia)}</h1>
+      <strong>${esc(EMPRESA.razao_social)}</strong><br>
+      CNPJ ${formatarCNPJ(EMPRESA.cnpj)} &nbsp; IE ${esc(EMPRESA.ie)}<br>
+      ${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)} - ${esc(EMPRESA.bairro)}<br>
+      ${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)} - CEP ${formatarCEP(EMPRESA.cep)}<br>
+      Tel ${formatarTelefone(EMPRESA.fone)}
+    </div>
+    <div class="box-nfce">
+      <h2>NFC-e</h2>
+      <div class="numero">Nº ${esc(nota.numero || "")}</div>
+      <div><b>Série:</b> ${esc(nota.serie || "1")}</div>
+      <div><b>Emissão:</b><br>${esc(dataBR)}</div>
+    </div>
   </div>
 
-  <div class="sep"></div>
+  <div class="section-title">DADOS DA VENDA</div>
+  <div class="grid-info">
+    <div>
+      <div class="info-line"><b>ID:</b> ${esc(nota.id || "")}</div>
+      <div class="info-line"><b>Cliente:</b> ${esc(nota.cliente?.nome || "Consumidor")}</div>
+      <div class="info-line"><b>Ambiente:</b> ${esc(ambiente)}</div>
+      <div class="info-line"><b>Status:</b> ${esc(statusExibido)}</div>
+      <div class="info-line"><b>Chave:</b> ${esc(chave)}</div>
+    </div>
+    <div class="card">
+      <h3>INFORMAÇÕES DA NFC-e</h3>
+      <div class="info-line"><b>Número:</b> ${esc(nota.numero || "")}</div>
+      <div class="info-line"><b>Série:</b> ${esc(nota.serie || "1")}</div>
+      <div class="info-line"><b>Emissão:</b> ${esc(dataBR)}</div>
+      <div class="info-line"><b>Tipo:</b> NFC-e (Consumidor Final)</div>
+    </div>
+  </div>
 
-  Número: ${nota.numero}<br>
-  Série: ${nota.serie}<br>
-  Data: ${esc(nota.dataEmissaoBR)}<br>
-  ID: ${esc(nota.id)}<br>
-  Cliente: ${esc(nota.cliente?.nome || "Consumidor")}
-
-  <div class="sep"></div>
-
+  <div class="section-title">ITENS DA VENDA</div>
   <table>
     <thead>
       <tr>
-        <th>Cód barras</th>
-        <th>Descrição</th>
-        <th>Qtd</th>
-        <th style="text-align:right">Unit</th>
-        <th style="text-align:right">Total</th>
+        <th>CÓD. BARRAS</th>
+        <th>DESCRIÇÃO</th>
+        <th class="center">QTD</th>
+        <th class="center">UN</th>
+        <th class="right">VL UNIT</th>
+        <th class="right">VL TOTAL</th>
       </tr>
     </thead>
-    <tbody>
-      ${itens}
-    </tbody>
+    <tbody>${itens}</tbody>
   </table>
 
-  <div class="sep"></div>
-
-  Qtd itens: ${(nota.itens || []).reduce((s, item) => s + Number(item.quantidade || 0), 0)}<br>
-  Subtotal: R$ ${moeda(nota.subtotal || 0)}<br>
-  Desconto: R$ ${moeda(nota.desconto || 0)}<br>
-
-  <div class="total">
-    TOTAL R$ ${moeda(nota.total || 0)}
+  <div class="resumo">
+    <div class="small">
+      <b>Documento emitido por ME ou EPP optante pelo Simples Nacional.</b><br>
+      Não gera direito a crédito fiscal de ICMS, de ISS e de IPI.
+    </div>
+    <div class="totais">
+      <div class="linha"><span>Qtd. de itens:</span><b>${moeda(qtdItens).replace(",00", "")}</b></div>
+      <div class="linha"><span>Subtotal:</span><b>R$ ${moeda(nota.subtotal || 0)}</b></div>
+      <div class="linha"><span>Desconto:</span><b>R$ ${moeda(nota.desconto || 0)}</b></div>
+      <div class="linha total"><span>TOTAL:</span><span>R$ ${moeda(nota.total || 0)}</span></div>
+    </div>
   </div>
 
-  Pagamento: ${esc(nota.pagamento?.tipo || "DINHEIRO")}<br>
-  Valor pago: R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}
-
-  <div class="sep"></div>
-
-  Status: ${esc(nota.status || "emitida_homologacao")}<br>
-  Chave: ${esc(nota.chave || nota.id)}<br>
-
-  <div style="margin-top:8px;font-size:11px;">
-    AMBIENTE DE TESTE / HOMOLOGAÇÃO
+  <div class="section-title">PAGAMENTO</div>
+  <div class="pagamento">
+    <div>
+      <div class="info-line"><b>Forma:</b> ${esc(forma)}</div>
+      <div class="info-line"><b>Valor pago:</b> R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}</div>
+    </div>
+    <div class="valor-pago"><span>VALOR TOTAL PAGO</span>R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}</div>
   </div>
 
+  <div class="msg">OBRIGADO PELA PREFERÊNCIA!<br>VOLTE SEMPRE!</div>
+
+  <div class="rodape">
+    <div class="qr-placeholder">QR CODE<br>NFC-e</div>
+    <div>
+      Consulte pela chave de acesso em:<br>
+      <b>https://www.nfce.fazenda.mg.gov.br/portalnfce</b>
+      <div class="chave">${esc(chave || "CHAVE EM AMBIENTE DE TESTE")}</div>
+      <div class="small" style="margin-top:6px;">
+        Este documento não é válido como recibo de pagamento.<br>
+        <b>AMBIENTE DE TESTE / ${esc(ambiente)}</b>
+      </div>
+    </div>
+    <div style="text-align:center;"><b>NFC-e</b><br>Nota Fiscal de<br>Consumidor Eletrônica</div>
+  </div>
+
+  <div class="small" style="text-align:center;margin-top:14px;">
+    Impresso em: ${esc(agoraBR())}<br>
+    BELA MODAS - Sistema Bela Caixa
+  </div>
 </div>
 
-<div class="btns">
+<div class="botoes">
   <button onclick="window.print()">Imprimir</button>
   <button onclick="window.close()">Fechar</button>
 </div>
-
 </body>
 </html>`;
 }
-
 // ================= HELPERS DE EXPORTAÇÃO =================
 
 async function obterArquivosXmlMes(mes) {
