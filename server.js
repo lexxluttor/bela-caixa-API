@@ -257,6 +257,23 @@ async function listarNfceNotasRemotas({ dia = "", mes = "" } = {}) {
   return Array.isArray(data.rows) ? data.rows : [];
 }
 
+async function getNotaEmitidaPorVendaId(vendaId) {
+  const id = String(vendaId || "");
+  if (!id || !API_BELA_SHEETS) return null;
+
+  try {
+    const notas = await listarNfceNotasRemotas({});
+    return notas.find(n => {
+      const mesmoId = String(n.vendaId || n.id || "") === id;
+      const status = String(n.status || "").toLowerCase();
+      return mesmoId && !status.includes("cancelada");
+    }) || null;
+  } catch (e) {
+    console.error("⚠ falha ao verificar duplicidade NFC-e:", e.message);
+    return null;
+  }
+}
+
 // ================= STORAGE LOCAL =================
 
 async function ensureDirs() {
@@ -920,6 +937,28 @@ app.post("/nfce/emitir", async (req, res) => {
   try {
     const venda = normalizarPayload(req.body);
     const id = String(req.body.vendaId || req.body.id || venda.vendaId || `nfce-${Date.now()}`);
+
+    const notaExistente = await getNotaEmitidaPorVendaId(id);
+    if (notaExistente) {
+      const notaId = String(notaExistente.id || id);
+      return res.json({
+        ok: true,
+        mensagem: "Venda já possui NFC-e emitida. Emissão duplicada bloqueada.",
+        duplicada_bloqueada: true,
+        nfce: {
+          id: notaId,
+          numero: notaExistente.numero || "",
+          serie: notaExistente.serie || "",
+          chave: notaExistente.chave || notaId,
+          status: notaExistente.status || "emitida_homologacao",
+          pdf_url: notaExistente.pdfUrl || notaExistente.pdf_url || `${BASE_URL}/nfce/${encodeURIComponent(notaId)}/pdf`,
+          xml_url: notaExistente.xmlUrl || notaExistente.xml_url || `${BASE_URL}/nfce/${encodeURIComponent(notaId)}/xml`,
+          numeracao_origem: "nota_existente",
+          xml_salvo_apps_script: true,
+          erro_apps_script: null
+        }
+      });
+    }
 
     let numero;
     let serie;
