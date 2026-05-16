@@ -1,9 +1,16 @@
+// Backend NFC-e Bela Modas - Preparado para Homologação SEFAZ MG
 import express from "express";
 import cors from "cors";
 import zlib from "zlib";
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
+
+import forge from "node-forge";
+import { SignedXml } from "xml-crypto";
+import { DOMParser } from "xmldom";
+import crypto from "crypto";
+
 
 const app = express();
 app.use(cors());
@@ -52,6 +59,107 @@ const EMPRESA = {
 let sequencial = 1;
 
 // ================= AUXILIARES =================
+
+function calcularDV(chave43) {
+  let peso = 2;
+  let soma = 0;
+
+  for (let i = chave43.length - 1; i >= 0; i--) {
+    soma += Number(chave43[i]) * peso;
+    peso = peso === 9 ? 2 : peso + 1;
+  }
+
+  const resto = soma % 11;
+  return resto === 0 || resto === 1 ? 0 : 11 - resto;
+}
+
+function gerarChaveAcesso(numeroNF) {
+  const cUF = "31";
+
+  const agora = new Date();
+  const ano = String(agora.getFullYear()).slice(-2);
+  const mes = String(agora.getMonth() + 1).padStart(2, "0");
+
+  const aamm = `${ano}${mes}`;
+
+  const cnpj = somenteDigitos(EMPRESA.cnpj);
+  const modelo = "65";
+  const serie = "001";
+  const numero = String(numeroNF).padStart(9, "0");
+  const tpEmis = "1";
+
+  const cNF = String(
+    Math.floor(Math.random() * 99999999)
+  ).padStart(8, "0");
+
+  const chave43 = `${cUF}${aamm}${cnpj}${modelo}${serie}${numero}${tpEmis}${cNF}`;
+
+  const dv = calcularDV(chave43);
+
+  return `${chave43}${dv}`;
+}
+
+function assinarXML(xml, refId) {
+  try {
+    if (!certificado || !CERT_PASSWORD) {
+      console.log("⚠ certificado não configurado");
+      return xml;
+    }
+
+    const p12Der = forge.util.createBuffer(
+      certificado.toString("binary")
+    );
+
+    const p12Asn1 = forge.asn1.fromDer(p12Der);
+
+    const p12 = forge.pkcs12.pkcs12FromAsn1(
+      p12Asn1,
+      CERT_PASSWORD
+    );
+
+    let chavePrivada = null;
+
+    for (const sci of p12.safeContents) {
+      for (const sbi of sci.safeBags) {
+        if (sbi.key) {
+          chavePrivada = forge.pki.privateKeyToPem(sbi.key);
+        }
+      }
+    }
+
+    if (!chavePrivada) {
+      throw new Error("Chave privada não encontrada");
+    }
+
+    const sig = new SignedXml();
+
+    sig.privateKey = chavePrivada;
+
+    sig.addReference({
+      xpath: `//*[@Id='${refId}']`,
+      digestAlgorithm:
+        "http://www.w3.org/2000/09/xmldsig#sha1",
+      transforms: [
+        "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+      ]
+    });
+
+    sig.canonicalizationAlgorithm =
+      "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
+
+    sig.signatureAlgorithm =
+      "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+
+    sig.computeSignature(xml);
+
+    return sig.getSignedXml();
+  } catch (e) {
+    console.error("Erro assinatura XML:", e.message);
+    return xml;
+  }
+}
+
 
 function somenteDigitos(v = "") {
   return String(v || "").replace(/\D+/g, "");
@@ -754,6 +862,94 @@ button{
 </head>
 <body>
 <div class="cupom">
+<div class="logo">
+<img src="https://i.imgur.com/8Km9tLL.png" />
+</div>
+<div class="titulo">BELA MODAS</div>
+<div class="subtitulo">
+Moda, calçados e acessórios
+</div>
+<div class="linha"></div>
+
+
+<style>
+@media print {
+  body {
+    width: 80mm;
+    margin: 0;
+    padding: 0;
+    font-family: Arial, sans-serif;
+  }
+}
+
+body{
+  font-family: Arial, sans-serif;
+  width: 80mm;
+  margin: auto;
+  color:#000;
+}
+
+.cupom{
+  padding:8px;
+}
+
+.logo{
+  text-align:center;
+  margin-bottom:8px;
+}
+
+.logo img{
+  max-width:140px;
+  max-height:80px;
+}
+
+.titulo{
+  text-align:center;
+  font-size:18px;
+  font-weight:bold;
+}
+
+.subtitulo{
+  text-align:center;
+  font-size:11px;
+  margin-bottom:8px;
+}
+
+.linha{
+  border-top:1px dashed #000;
+  margin:6px 0;
+}
+
+.item{
+  font-size:12px;
+  margin-bottom:5px;
+}
+
+.total{
+  font-size:20px;
+  font-weight:bold;
+  text-align:center;
+  margin-top:10px;
+}
+
+.pagamento{
+  font-size:12px;
+  margin-top:6px;
+}
+
+.qrcode{
+  text-align:center;
+  margin-top:10px;
+}
+
+.rodape{
+  text-align:center;
+  font-size:11px;
+  margin-top:10px;
+}
+</style>
+
+<div class="cupom">
 
   <div class="center">
     <strong style="font-size:18px;">${esc(EMPRESA.nome_fantasia)}</strong><br>
@@ -820,6 +1016,13 @@ button{
   <button onclick="window.close()">Fechar</button>
 </div>
 
+
+<div class="linha"></div>
+<div class="rodape">
+Obrigado pela preferência ❤️<br>
+Bela Modas
+</div>
+</div>
 </body>
 </html>`;
 }
@@ -1236,3 +1439,55 @@ ensureDirs()
     console.error("Falha ao iniciar API:", err);
     process.exit(1);
   });
+
+
+// ================= CONFIG SIMPLES NACIONAL =================
+
+const CRT = "1";
+const CSOSN_PADRAO = "102";
+
+function gerarBlocoICMS_SN() {
+  return `
+  <ICMS>
+    <ICMSSN102>
+      <orig>0</orig>
+      <CSOSN>${CSOSN_PADRAO}</CSOSN>
+    </ICMSSN102>
+  </ICMS>
+  `;
+}
+
+function gerarBlocoPIS_SN() {
+  return `
+  <PIS>
+    <PISNT>
+      <CST>49</CST>
+    </PISNT>
+  </PIS>
+  `;
+}
+
+function gerarBlocoCOFINS_SN() {
+  return `
+  <COFINS>
+    <COFINSNT>
+      <CST>49</CST>
+    </COFINSNT>
+  </COFINS>
+  `;
+}
+
+function gerarVTotTrib(valor) {
+  return (Number(valor || 0) * 0.12).toFixed(2);
+}
+
+// Ambiente homologação padrão
+const NFE_AMBIENTE = process.env.NFE_AMBIENTE || "2";
+
+// Preparado para futura integração SEFAZ
+// pendente:
+// - SOAP
+// - envio lote
+// - retorno autorização
+// - consulta recibo
+// - CSC produção
