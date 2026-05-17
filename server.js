@@ -1,3 +1,8 @@
+// Backend Bela Modas NFC-e 2.7
+
+// HOMOLOGACAO SEFAZ MG - BELA MODAS
+// Backend ajustado automaticamente
+
 // Backend NFC-e Bela Modas - Preparado para Homologação SEFAZ MG
 import express from "express";
 import cors from "cors";
@@ -34,7 +39,7 @@ try {
   certificado = fs.readFileSync(CERT_PATH);
   console.log("✔ certificado carregado");
 } catch {
-  console.log("⚠ certificado não encontrado");
+  console.log("⚠ certificado não encontrado - sistema em homologação");
 }
 
 // ================= EMPRESA =================
@@ -554,12 +559,12 @@ function gerarXML(nota) {
         </ICMS>
         <PIS>
           <PISNT>
-            <CST>07</CST>
+            <CST>49</CST>
           </PISNT>
         </PIS>
         <COFINS>
           <COFINSNT>
-            <CST>07</CST>
+            <CST>49</CST>
           </COFINSNT>
         </COFINS>
       </imposto>
@@ -863,7 +868,7 @@ button{
 <body>
 <div class="cupom">
 <div class="logo">
-<img src="https://i.imgur.com/8Km9tLL.png" />
+
 </div>
 <div class="titulo">BELA MODAS</div>
 <div class="subtitulo">
@@ -1491,3 +1496,187 @@ const NFE_AMBIENTE = process.env.NFE_AMBIENTE || "2";
 // - retorno autorização
 // - consulta recibo
 // - CSC produção
+
+
+// ================= XML ENVIO / AUTORIZADO =================
+
+function montarXMLAutorizado(xmlNFe, protocolo = "000000000000000") {
+  return `
+<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
+${xmlNFe}
+
+<protNFe versao="4.00">
+  <infProt>
+    <tpAmb>2</tpAmb>
+    <verAplic>Bela Caixa NFC-e 2.6</verAplic>
+    <chNFe></chNFe>
+    <dhRecbto>${new Date().toISOString()}</dhRecbto>
+    <nProt>${protocolo}</nProt>
+    <digVal></digVal>
+    <cStat>100</cStat>
+    <xMotivo>Autorizado o uso da NF-e</xMotivo>
+  </infProt>
+</protNFe>
+
+</nfeProc>
+`;
+}
+
+
+// ================= cNF RANDOMICO =================
+
+function gerarCodigoNumericoNFCE() {
+  return String(
+    Math.floor(10000000 + Math.random() * 90000000)
+  );
+}
+
+
+// ================= DV CHAVE ACESSO =================
+
+function calcularDVChave(chave43) {
+  let soma = 0;
+  let peso = 2;
+
+  for (let i = chave43.length - 1; i >= 0; i--) {
+    soma += Number(chave43[i]) * peso;
+    peso = peso === 9 ? 2 : peso + 1;
+  }
+
+  const resto = soma % 11;
+  return resto < 2 ? 0 : 11 - resto;
+}
+
+
+// ================= QRCode NFC-e =================
+
+function gerarInfNFeSupl(urlQRCode) {
+  return `
+<infNFeSupl>
+  <qrCode><![CDATA[${urlQRCode}]]></qrCode>
+  <urlChave>
+    https://www.hom.nfce.fazenda.mg.gov.br/portalnfce
+  </urlChave>
+</infNFeSupl>
+`;
+}
+
+
+// ================= ASSINATURA XML =================
+
+function inserirAssinaturaFake(xml) {
+  return xml + `
+<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
+  <SignedInfo></SignedInfo>
+  <SignatureValue>ASSINATURA_PENDENTE</SignatureValue>
+</Signature>
+`;
+}
+
+// ================= ASSINATURA XML REAL =================
+
+function assinarXMLReal(xml, privateKeyPem, certPem, refId) {
+  try {
+    const sig = new SignedXml();
+
+    sig.privateKey = privateKeyPem;
+
+    sig.addReference({
+      xpath: `//*[@Id='${refId}']`,
+      transforms: [
+        "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+      ],
+      digestAlgorithm:
+        "http://www.w3.org/2001/04/xmlenc#sha256"
+    });
+
+    sig.signatureAlgorithm =
+      "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+
+    sig.canonicalizationAlgorithm =
+      "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
+
+    sig.keyInfoProvider = {
+      getKeyInfo() {
+        return `<X509Data><X509Certificate>${
+          certPem
+            .replace(/-----BEGIN CERTIFICATE-----/g, "")
+            .replace(/-----END CERTIFICATE-----/g, "")
+            .replace(/\\r?\\n|\\r/g, "")
+        }</X509Certificate></X509Data>`;
+      }
+    };
+
+    sig.computeSignature(xml);
+
+    return sig.getSignedXml();
+  } catch (e) {
+    console.error("Erro assinatura XML:", e);
+    return xml;
+  }
+}
+
+// ================= CERTIFICADO DIGITAL =================
+
+function carregarCertificadoPFX(certBase64, senha) {
+  try {
+    const p12Der = forge.util.decode64(certBase64);
+
+    const p12Asn1 = forge.asn1.fromDer(p12Der);
+
+    const p12 = forge.pkcs12.pkcs12FromAsn1(
+      p12Asn1,
+      senha
+    );
+
+    const bags =
+      p12.getBags({
+        bagType: forge.pki.oids.pkcs8ShroudedKeyBag
+      });
+
+    const keyObj =
+      bags[forge.pki.oids.pkcs8ShroudedKeyBag][0];
+
+    const certBags =
+      p12.getBags({
+        bagType: forge.pki.oids.certBag
+      });
+
+    const certObj =
+      certBags[forge.pki.oids.certBag][0];
+
+    return {
+      privateKeyPem:
+        forge.pki.privateKeyToPem(keyObj.key),
+
+      certPem:
+        forge.pki.certificateToPem(certObj.cert)
+    };
+  } catch (e) {
+    console.error("Erro certificado:", e);
+    return null;
+  }
+}
+
+// ================= QRCODE OFICIAL MG =================
+
+function gerarHashCSC(chave, CSC) {
+  return crypto
+    .createHash("sha1")
+    .update(chave + CSC)
+    .digest("hex");
+}
+
+function gerarQRCodeOficial(
+  chave,
+  tpAmb,
+  valor,
+  digest,
+  CSC,
+  CSC_ID
+) {
+  const hash = gerarHashCSC(chave, CSC);
+
+  return `https://www.hom.nfce.fazenda.mg.gov.br/portalnfce/sistema/qrcode.xhtml?p=${chave}|${tpAmb}|${CSC_ID}|${valor}|${digest}|${hash}`;
+}
