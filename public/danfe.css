@@ -1,0 +1,134 @@
+
+body{
+  background:#f3f3f3;
+  font-family:Arial;
+  padding:20px;
+}
+
+.danfe{
+  width:900px;
+  margin:auto;
+  background:#fff;
+  padding:20px;
+  border-radius:10px;
+}
+
+.topo{
+  display:flex;
+  justify-content:space-between;
+  gap:20px;
+}
+
+.empresa{
+  flex:1;
+  text-align:center;
+}
+
+.empresa h1{
+  margin:0;
+  font-size:52px;
+}
+
+.nfce-box{
+  width:220px;
+  border:1px solid #ccc;
+  border-radius:10px;
+  padding:15px;
+  text-align:center;
+}
+
+.numero{
+  font-size:40px;
+  font-weight:bold;
+}
+
+.barra{
+  background:#eee;
+  padding:10px;
+  margin:20px 0;
+  text-align:center;
+  border-radius:5px;
+  font-weight:bold;
+}
+
+.cliente{
+  margin-bottom:15px;
+  font-size:18px;
+}
+
+table{
+  width:100%;
+  border-collapse:collapse;
+}
+
+th, td{
+  border-bottom:1px solid #ccc;
+  padding:10px;
+  text-align:left;
+}
+
+.totais{
+  margin-top:20px;
+  display:flex;
+  justify-content:space-between;
+}
+
+.pagamento{
+  width:300px;
+}
+
+.box{
+  border:1px solid #ccc;
+  padding:15px;
+  border-radius:8px;
+  margin-bottom:10px;
+  text-align:center;
+}
+
+.total-final{
+  margin-top:15px;
+  background:#eee;
+  padding:15px;
+  font-size:28px;
+  font-weight:bold;
+  border-radius:8px;
+}
+
+.tributos{
+  margin-top:20px;
+  border:1px dashed #aaa;
+  padding:15px;
+  border-radius:8px;
+  text-align:center;
+}
+
+.simples{
+  margin-top:20px;
+  text-align:center;
+  font-weight:bold;
+}
+
+.rodape-info{
+  margin-top:20px;
+  border:1px dashed #ccc;
+  padding:15px;
+  border-radius:8px;
+}
+
+.chave{
+  background:#eee;
+  padding:10px;
+  border-radius:5px;
+  word-break:break-all;
+}
+
+.qrcode{
+  text-align:center;
+  margin-top:20px;
+}
+
+.mensagem{
+  margin-top:20px;
+  text-align:center;
+  font-size:22px;
+}
