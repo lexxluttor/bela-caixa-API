@@ -788,17 +788,16 @@ function makeZip(files) {
 // ================= HTML CUPOM =================
 
 function gerarHTML(nota) {
-  const itens = (nota.itens || []).map((item) => {
-    const codigoExibido = item.ean || item.codigo || "-";
+  const itens = (nota.itens || []).map((item, index) => {
     return `
-<tr>
-  <td>${esc(codigoExibido)}</td>
-  <td>${esc(item.descricao)}</td>
-  <td style="text-align:center">${item.quantidade}</td>
-  <td style="text-align:right">${moeda(item.valorUnitario)}</td>
-  <td style="text-align:right">${moeda(item.valorTotal)}</td>
-</tr>
-`;
+      <tr>
+        <td>${index + 1}</td>
+        <td>${esc(item.descricao || "")}</td>
+        <td style="text-align:center">${Number(item.quantidade || 0).toFixed(0)}</td>
+        <td style="text-align:right">R$ ${moeda(item.valorUnitario || 0)}</td>
+        <td style="text-align:right">R$ ${moeda(item.valorTotal || 0)}</td>
+      </tr>
+    `;
   }).join("");
 
   return `<!DOCTYPE html>
@@ -806,185 +805,261 @@ function gerarHTML(nota) {
 <head>
 <meta charset="UTF-8">
 <title>NFC-e ${nota.numero}</title>
+
 <style>
+@page{
+  size:80mm auto;
+  margin:0;
+}
+
 body{
-  font-family: monospace;
-  background:#fff;
   margin:0;
   padding:10px;
+  background:#f4f4f4;
+  font-family:Arial,sans-serif;
   color:#000;
 }
+
 .cupom{
-  width:300px;
+  width:80mm;
   margin:auto;
-  font-size:12px;
+  background:#fff;
+  padding:12px;
+  border-radius:8px;
+  box-sizing:border-box;
 }
-.center{
+
+.topo{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:10px;
+}
+
+.empresa{
+  flex:1;
   text-align:center;
 }
-.sep{
-  border-top:1px dashed #000;
-  margin:6px 0;
+
+.empresa h1{
+  margin:0;
+  font-size:22px;
 }
+
+.empresa p{
+  margin:2px 0;
+  font-size:13px;
+}
+
+.box-nfce{
+  width:150px;
+  border:1px solid #ccc;
+  border-radius:8px;
+  padding:8px;
+  text-align:center;
+}
+
+.box-nfce h2{
+  margin:0;
+  font-size:18px;
+}
+
+.box-nfce .numero{
+  font-size:34px;
+  font-weight:bold;
+}
+
+.barra{
+  margin:12px 0;
+  background:#eee;
+  padding:8px;
+  text-align:center;
+  font-weight:bold;
+  border-radius:4px;
+  font-size:14px;
+}
+
+.cliente{
+  margin:10px 0;
+  font-size:14px;
+}
+
 table{
   width:100%;
   border-collapse:collapse;
-  font-size:11px;
-}
-th{
-  text-align:left;
-  border-bottom:1px solid #000;
-  padding-bottom:3px;
-}
-td{
-  padding:2px 0;
-  vertical-align:top;
-}
-.total{
-  font-size:14px;
-  font-weight:bold;
-}
-.btns{
-  margin-top:10px;
-  display:flex;
-  gap:6px;
-  justify-content:center;
-}
-button{
-  padding:6px 10px;
-  border:none;
-  background:#000;
-  color:#fff;
-  border-radius:6px;
-  cursor:pointer;
   font-size:12px;
 }
-@media print{
-  body{ padding:0; }
-  .btns{ display:none; }
-}
-</style>
-</head>
-<body>
-<div class="cupom">
-<div class="logo">
 
-</div>
-<div class="titulo">BELA MODAS</div>
-<div class="subtitulo">
-Moda, calçados e acessórios
-</div>
-<div class="linha"></div>
-
-
-<style>
-@media print {
-  body {
-    width: 80mm;
-    margin: 0;
-    padding: 0;
-    font-family: Arial, sans-serif;
-  }
+th{
+  border-top:1px solid #000;
+  border-bottom:1px solid #000;
+  padding:6px 2px;
+  text-align:left;
 }
 
-body{
-  font-family: Arial, sans-serif;
-  width: 80mm;
-  margin: auto;
-  color:#000;
+td{
+  padding:6px 2px;
+  border-bottom:1px dashed #ccc;
+  vertical-align:top;
 }
 
-.cupom{
-  padding:8px;
+.resumo{
+  margin-top:12px;
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
 }
 
-.logo{
-  text-align:center;
+.total-box{
+  flex:1;
+}
+
+.total-box div{
   margin-bottom:8px;
 }
 
-.logo img{
-  max-width:140px;
-  max-height:80px;
-}
-
-.titulo{
-  text-align:center;
+.total-final{
+  background:#f1f1f1;
+  padding:10px;
+  border-radius:6px;
   font-size:18px;
   font-weight:bold;
 }
 
-.subtitulo{
+.pagamento-box{
+  width:210px;
+}
+
+.pagamento-card{
+  border:1px solid #ccc;
+  border-radius:6px;
+  padding:10px;
+  margin-bottom:10px;
   text-align:center;
-  font-size:11px;
-  margin-bottom:8px;
 }
 
-.linha{
-  border-top:1px dashed #000;
-  margin:6px 0;
+.pagamento-card strong{
+  display:block;
+  margin-bottom:6px;
 }
 
-.item{
-  font-size:12px;
-  margin-bottom:5px;
-}
-
-.total{
-  font-size:20px;
-  font-weight:bold;
+.tributos{
+  margin-top:16px;
+  border:1px dashed #aaa;
+  border-radius:6px;
+  padding:10px;
   text-align:center;
-  margin-top:10px;
+  font-size:13px;
 }
 
-.pagamento{
-  font-size:12px;
+.info-final{
+  margin-top:16px;
+  border:1px dashed #ccc;
+  border-radius:6px;
+  padding:10px;
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  font-size:13px;
+}
+
+.chave{
+  background:#f1f1f1;
+  padding:6px;
+  border-radius:4px;
+  word-break:break-all;
   margin-top:6px;
 }
 
 .qrcode{
+  margin-top:16px;
   text-align:center;
-  margin-top:10px;
 }
 
 .rodape{
+  margin-top:16px;
   text-align:center;
-  font-size:11px;
-  margin-top:10px;
+  border:1px solid #ddd;
+  border-radius:6px;
+  padding:12px;
+  font-size:14px;
+}
+
+.botoes{
+  text-align:center;
+  margin-top:14px;
+}
+
+button{
+  padding:8px 14px;
+  border:none;
+  border-radius:6px;
+  background:#222;
+  color:#fff;
+  cursor:pointer;
+  margin:0 4px;
+}
+
+@media print{
+  body{
+    background:#fff;
+    padding:0;
+  }
+
+  .cupom{
+    width:100%;
+    border-radius:0;
+  }
+
+  .botoes{
+    display:none;
+  }
 }
 </style>
+</head>
+
+<body>
 
 <div class="cupom">
 
-  <div class="center">
-    <strong style="font-size:18px;">${esc(EMPRESA.nome_fantasia)}</strong><br>
-    ${esc(EMPRESA.razao_social)}<br>
-    CNPJ ${formatarCNPJ(EMPRESA.cnpj)}<br>
-    IE ${esc(EMPRESA.ie)}<br>
-    ${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)}<br>
-    ${esc(EMPRESA.bairro)} - ${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)}<br>
-    CEP ${formatarCEP(EMPRESA.cep)}<br>
-    Tel ${formatarTelefone(EMPRESA.fone)}
+  <div class="topo">
+
+    <div class="empresa">
+      <h1>${esc(EMPRESA.nome_fantasia)}</h1>
+      <p>${esc(EMPRESA.razao_social)}</p>
+      <p>CNPJ: ${formatarCNPJ(EMPRESA.cnpj)} &nbsp;&nbsp; IE: ${esc(EMPRESA.ie)}</p>
+      <p>${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)} - ${esc(EMPRESA.bairro)}</p>
+      <p>${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)} - CEP: ${formatarCEP(EMPRESA.cep)}</p>
+      <p>Tel: ${formatarTelefone(EMPRESA.fone)}</p>
+    </div>
+
+    <div class="box-nfce">
+      <h2>NFC-e</h2>
+      <div class="numero">${nota.numero}</div>
+      <div>SÉRIE: ${nota.serie}</div>
+      <div style="margin-top:8px;">EMISSÃO:</div>
+      <div>${esc(nota.dataEmissaoBR)}</div>
+      <div style="margin-top:8px;">VIA CONSUMIDOR</div>
+    </div>
+
   </div>
 
-  <div class="sep"></div>
+  <div class="barra">
+    DANFE NFC-e - Documento Auxiliar da Nota Fiscal de Consumidor Eletrônica
+  </div>
 
-  Número: ${nota.numero}<br>
-  Série: ${nota.serie}<br>
-  Data: ${esc(nota.dataEmissaoBR)}<br>
-  ID: ${esc(nota.id)}<br>
-  Cliente: ${esc(nota.cliente?.nome || "Consumidor")}
-
-  <div class="sep"></div>
+  <div class="cliente">
+    <strong>Cliente:</strong> ${esc(nota.cliente?.nome || "Balcão")}
+  </div>
 
   <table>
     <thead>
       <tr>
-        <th>Cód barras</th>
-        <th>Descrição</th>
-        <th>Qtd</th>
-        <th style="text-align:right">Unit</th>
-        <th style="text-align:right">Total</th>
+        <th>CÓDIGO</th>
+        <th>DESCRIÇÃO</th>
+        <th>QTD</th>
+        <th>VL UNIT</th>
+        <th>VL TOTAL</th>
       </tr>
     </thead>
     <tbody>
@@ -992,42 +1067,82 @@ body{
     </tbody>
   </table>
 
-  <div class="sep"></div>
+  <div class="resumo">
 
-  Qtd itens: ${(nota.itens || []).reduce((s, item) => s + Number(item.quantidade || 0), 0)}<br>
-  Subtotal: R$ ${moeda(nota.subtotal || 0)}<br>
-  Desconto: R$ ${moeda(nota.desconto || 0)}<br>
+    <div class="total-box">
+      <div>QTD. ITENS: ${(nota.itens || []).length}</div>
+      <div>SUBTOTAL: R$ ${moeda(nota.subtotal || nota.total || 0)}</div>
+      <div>DESCONTO: R$ ${moeda(nota.desconto || 0)}</div>
 
-  <div class="total">
-    TOTAL R$ ${moeda(nota.total || 0)}
+      <div class="total-final">
+        TOTAL: R$ ${moeda(nota.total || 0)}
+      </div>
+    </div>
+
+    <div class="pagamento-box">
+
+      <div class="pagamento-card">
+        <strong>FORMA DE PAGAMENTO</strong>
+        ${esc(nota.pagamento?.tipo || "DINHEIRO")}
+      </div>
+
+      <div class="pagamento-card">
+        <strong>VALOR PAGO</strong>
+        R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}
+      </div>
+
+    </div>
+
   </div>
 
-  Pagamento: ${esc(nota.pagamento?.tipo || "DINHEIRO")}<br>
-  Valor pago: R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}
+  <div class="tributos">
+    <strong>INFORMAÇÕES DOS TRIBUTOS</strong><br><br>
+    Tributos Totais (Lei Federal 12.741/2012)<br>
+    R$ ${moeda(nota.valorTributos || 0)}
+  </div>
 
-  <div class="sep"></div>
+  <div style="margin-top:12px;text-align:center;font-size:13px;font-weight:bold;">
+    DOCUMENTO EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL<br>
+    NÃO GERA DIREITO A CRÉDITO FISCAL DE ICMS, ISS E IPI
+  </div>
 
-  Status: ${esc(nota.status || "emitida_homologacao")}<br>
-  Chave: ${esc(nota.chave || nota.id)}<br>
+  <div class="info-final">
 
-  <div style="margin-top:8px;font-size:11px;">
-    AMBIENTE DE TESTE / HOMOLOGAÇÃO
+    <div>
+      <div>Número: ${nota.numero}</div>
+      <div>Série: ${nota.serie}</div>
+      <div>Data de Emissão: ${esc(nota.dataEmissaoBR)}</div>
+      <div>Status: ${esc(nota.status || "EMITIDA")}</div>
+    </div>
+
+    <div>
+      <div><strong>Ambiente:</strong> HOMOLOGAÇÃO</div>
+      <div style="margin-top:10px;"><strong>Chave de Acesso</strong></div>
+      <div class="chave">
+        ${esc(nota.chave || "")}
+      </div>
+    </div>
+
+  </div>
+
+  <div class="qrcode">
+    <p>Consulte pela chave de acesso em:</p>
+    <strong>www.nfce.fazenda.mg.gov.br/portalnfce</strong>
+  </div>
+
+  <div class="rodape">
+    <strong>MENSAGEM AO CONSUMIDOR</strong><br>
+    Obrigado pela preferência!<br>
+    Volte sempre!
+  </div>
+
+  <div class="botoes">
+    <button onclick="window.print()">Imprimir</button>
+    <button onclick="window.close()">Fechar</button>
   </div>
 
 </div>
 
-<div class="btns">
-  <button onclick="window.print()">Imprimir</button>
-  <button onclick="window.close()">Fechar</button>
-</div>
-
-
-<div class="linha"></div>
-<div class="rodape">
-Obrigado pela preferência ❤️<br>
-Bela Modas
-</div>
-</div>
 </body>
 </html>`;
 }
