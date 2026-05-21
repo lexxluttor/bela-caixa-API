@@ -1,9 +1,3 @@
-// Backend Bela Modas NFC-e 2.7
-
-// HOMOLOGACAO SEFAZ MG - BELA MODAS
-// Backend ajustado automaticamente
-
-// Backend NFC-e Bela Modas - Preparado para Homologação SEFAZ MG
 import express from "express";
 import cors from "cors";
 import zlib from "zlib";
@@ -11,18 +5,13 @@ import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
 
-import forge from "node-forge";
-import { SignedXml } from "xml-crypto";
-import { DOMParser } from "xmldom";
-import crypto from "crypto";
-
-
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || "https://bela-caixa-api.onrender.com";
+const LOGO_URL = process.env.LOGO_URL || "";
 const API_BELA_SHEETS = process.env.API_BELA_SHEETS || "";
 
 const DATA_DIR = path.resolve("./storage");
@@ -39,7 +28,7 @@ try {
   certificado = fs.readFileSync(CERT_PATH);
   console.log("✔ certificado carregado");
 } catch {
-  console.log("⚠ certificado não encontrado - sistema em homologação");
+  console.log("⚠ certificado não encontrado");
 }
 
 // ================= EMPRESA =================
@@ -64,107 +53,6 @@ const EMPRESA = {
 let sequencial = 1;
 
 // ================= AUXILIARES =================
-
-function calcularDV(chave43) {
-  let peso = 2;
-  let soma = 0;
-
-  for (let i = chave43.length - 1; i >= 0; i--) {
-    soma += Number(chave43[i]) * peso;
-    peso = peso === 9 ? 2 : peso + 1;
-  }
-
-  const resto = soma % 11;
-  return resto === 0 || resto === 1 ? 0 : 11 - resto;
-}
-
-function gerarChaveAcesso(numeroNF) {
-  const cUF = "31";
-
-  const agora = new Date();
-  const ano = String(agora.getFullYear()).slice(-2);
-  const mes = String(agora.getMonth() + 1).padStart(2, "0");
-
-  const aamm = `${ano}${mes}`;
-
-  const cnpj = somenteDigitos(EMPRESA.cnpj);
-  const modelo = "65";
-  const serie = "001";
-  const numero = String(numeroNF).padStart(9, "0");
-  const tpEmis = "1";
-
-  const cNF = String(
-    Math.floor(Math.random() * 99999999)
-  ).padStart(8, "0");
-
-  const chave43 = `${cUF}${aamm}${cnpj}${modelo}${serie}${numero}${tpEmis}${cNF}`;
-
-  const dv = calcularDV(chave43);
-
-  return `${chave43}${dv}`;
-}
-
-function assinarXML(xml, refId) {
-  try {
-    if (!certificado || !CERT_PASSWORD) {
-      console.log("⚠ certificado não configurado");
-      return xml;
-    }
-
-    const p12Der = forge.util.createBuffer(
-      certificado.toString("binary")
-    );
-
-    const p12Asn1 = forge.asn1.fromDer(p12Der);
-
-    const p12 = forge.pkcs12.pkcs12FromAsn1(
-      p12Asn1,
-      CERT_PASSWORD
-    );
-
-    let chavePrivada = null;
-
-    for (const sci of p12.safeContents) {
-      for (const sbi of sci.safeBags) {
-        if (sbi.key) {
-          chavePrivada = forge.pki.privateKeyToPem(sbi.key);
-        }
-      }
-    }
-
-    if (!chavePrivada) {
-      throw new Error("Chave privada não encontrada");
-    }
-
-    const sig = new SignedXml();
-
-    sig.privateKey = chavePrivada;
-
-    sig.addReference({
-      xpath: `//*[@Id='${refId}']`,
-      digestAlgorithm:
-        "http://www.w3.org/2000/09/xmldsig#sha1",
-      transforms: [
-        "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
-        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
-      ]
-    });
-
-    sig.canonicalizationAlgorithm =
-      "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
-
-    sig.signatureAlgorithm =
-      "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
-
-    sig.computeSignature(xml);
-
-    return sig.getSignedXml();
-  } catch (e) {
-    console.error("Erro assinatura XML:", e.message);
-    return xml;
-  }
-}
-
 
 function somenteDigitos(v = "") {
   return String(v || "").replace(/\D+/g, "");
@@ -271,46 +159,6 @@ function normalizarMes(ano, mes) {
     return "";
   }
   return `${a}-${pad2(m)}`;
-}
-
-// ================= CHAVE DE ACESSO NFC-e =================
-
-const CUF_MG = "31";
-
-function calcularDVChave(chave43) {
-  // Módulo 11 com pesos 2-9 ciclicamente da direita para esquerda
-  const seq = [2, 3, 4, 5, 6, 7, 8, 9];
-  let soma = 0;
-  let seqIdx = 0;
-  for (let i = chave43.length - 1; i >= 0; i--) {
-    soma += parseInt(chave43[i], 10) * seq[seqIdx % 8];
-    seqIdx++;
-  }
-  const resto = soma % 11;
-  return resto < 2 ? 0 : 11 - resto;
-}
-
-function gerarCNF(numero) {
-  // cNF: 8 dígitos aleatórios/sequenciais (diferente do nNF)
-  return String(numero).padStart(8, "0").slice(-8);
-}
-
-function calcularChaveAcesso(nota) {
-  const aamm = nota.dataEmissaoIso
-    ? nota.dataEmissaoIso.substring(2, 4) + nota.dataEmissaoIso.substring(5, 7)
-    : new Date().toISOString().substring(2, 4) + new Date().toISOString().substring(5, 7);
-
-  const cnpj     = EMPRESA.cnpj.padStart(14, "0");
-  const mod      = "65";
-  const serie    = String(nota.serie || 1).padStart(3, "0");
-  const nnf      = String(nota.numero || 1).padStart(9, "0");
-  const tpEmis   = "1"; // emissão normal
-  const cnf      = gerarCNF(nota.numero || 1);
-
-  const chave43  = CUF_MG + aamm + cnpj + mod + serie + nnf + tpEmis + cnf;
-  const cdv      = calcularDVChave(chave43);
-
-  return chave43 + String(cdv);
 }
 
 // ================= FORMA DE PAGAMENTO FISCAL =================
@@ -516,178 +364,95 @@ function normalizarPayload(body = {}) {
 // ================= XML =================
 
 function gerarXML(nota) {
-  // Chave de acesso: calcula se não existir ainda
-  const chave = nota.chaveAcesso || calcularChaveAcesso(nota);
-  const nfeId = `NFe${chave}`;
-
-  const cnf    = gerarCNF(nota.numero || 1);
-  const serie  = String(nota.serie || 1).padStart(3, "0");
-  const nnf    = String(nota.numero || 1).padStart(9, "0");
-  const tpAmb  = "2"; // 1=produção, 2=homologação
-  const dhEmi  = nota.dataEmissaoIso
-    ? nota.dataEmissaoIso.replace("Z", "-03:00").substring(0, 19) + "-03:00"
-    : new Date().toISOString().replace("Z", "-03:00").substring(0, 19) + "-03:00";
-
-  // Itens
-  const itensXml = (nota.itens || []).map((item, idx) => {
-    const vProd = dinheiro(item.valorTotal || (item.quantidade * item.valorUnitario));
-    return `
+  const itensXml = (nota.itens || []).map((item, idx) => `
     <det nItem="${idx + 1}">
       <prod>
-        <cProd>${esc(item.codigo || String(idx + 1).padStart(6, "0"))}</cProd>
-        <cEAN>${esc(item.ean && item.ean.length >= 8 ? item.ean : "SEM GTIN")}</cEAN>
-        <xProd>${esc(item.descricao || "PRODUTO")}</xProd>
-        <NCM>${esc(item.ncm || "62034200")}</NCM>
-        <CFOP>${esc(item.cfop || "5102")}</CFOP>
-        <uCom>${esc(item.unidade || "UN")}</uCom>
+        <cProd>${esc(item.codigo || String(idx + 1))}</cProd>
+        <cEAN>${esc(item.ean || "SEM GTIN")}</cEAN>
+        <xProd>${esc(item.descricao)}</xProd>
+        <NCM>${esc(item.ncm)}</NCM>
+        <CFOP>${esc(item.cfop)}</CFOP>
+        <uCom>${esc(item.unidade)}</uCom>
         <qCom>${dinheiro(item.quantidade)}</qCom>
         <vUnCom>${dinheiro(item.valorUnitario)}</vUnCom>
-        <vProd>${vProd}</vProd>
-        <cEANTrib>${esc(item.ean && item.ean.length >= 8 ? item.ean : "SEM GTIN")}</cEANTrib>
-        <uTrib>${esc(item.unidade || "UN")}</uTrib>
-        <qTrib>${dinheiro(item.quantidade)}</qTrib>
-        <vUnTrib>${dinheiro(item.valorUnitario)}</vUnTrib>
-        <indTot>1</indTot>
+        <vProd>${dinheiro(item.valorTotal)}</vProd>
       </prod>
       <imposto>
-        <vTotTrib>0.00</vTotTrib>
         <ICMS>
           <ICMSSN102>
-            <orig>${esc(item.origem || "0")}</orig>
-            <CSOSN>102</CSOSN>
+            <orig>${esc(item.origem)}</orig>
+            <CSOSN>${esc(item.csosn)}</CSOSN>
           </ICMSSN102>
         </ICMS>
-        <PIS>
-          <PISNT>
-            <CST>49</CST>
-          </PISNT>
-        </PIS>
-        <COFINS>
-          <COFINSNT>
-            <CST>49</CST>
-          </COFINSNT>
-        </COFINS>
       </imposto>
-    </det>`
-  }).join("");
-
-  // Totais
-  const vProdTotal = dinheiro(nota.subtotal || nota.total || 0);
-  const vDesc      = dinheiro(nota.desconto || 0);
-  const vNF        = dinheiro(nota.total || 0);
-
-  // Destinatário: omite bloco se não tiver CPF (consumidor não identificado)
-  const temCpf = nota.cliente?.cpf && somenteDigitos(nota.cliente.cpf).length === 11;
-  const destXml = temCpf ? `
-  <dest>
-    <CPF>${somenteDigitos(nota.cliente.cpf)}</CPF>
-    <xNome>${esc(nota.cliente.nome || "CONSUMIDOR NAO IDENTIFICADO")}</xNome>
-    <indIEDest>9</indIEDest>
-  </dest>` : "";
-
-  // Pagamento — suporta múltiplas formas
-  const pagamentos = Array.isArray(nota.pagamentos) && nota.pagamentos.length
-    ? nota.pagamentos
-    : [{ tipo: nota.pagamento?.tipo || "DINHEIRO", valor: nota.pagamento?.valor || nota.total }];
-
-  const detPagXml = pagamentos.map(p => `
-    <detPag>
-      <indPag>0</indPag>
-      <tPag>${mapearFormaPagamentoFiscal(p.tipo)}</tPag>
-      <vPag>${dinheiro(p.valor)}</vPag>
-    </detPag>`).join("");
+    </det>
+  `).join("");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<nfeProc versao="4.00" xmlns="http://www.portalfiscal.inf.br/nfe">
-  <NFe xmlns="http://www.portalfiscal.inf.br/nfe">
-    <infNFe Id="${nfeId}" versao="4.00">
-      <ide>
-        <cUF>${CUF_MG}</cUF>
-        <cNF>${cnf}</cNF>
-        <natOp>VENDA DE MERCADORIA</natOp>
-        <mod>65</mod>
-        <serie>${serie}</serie>
-        <nNF>${nnf}</nNF>
-        <dhEmi>${dhEmi}</dhEmi>
-        <tpNF>1</tpNF>
-        <idDest>1</idDest>
-        <cMunFG>3106705</cMunFG>
-        <tpImp>4</tpImp>
-        <tpEmis>1</tpEmis>
-        <cDV>${chave.slice(-1)}</cDV>
-        <tpAmb>${tpAmb}</tpAmb>
-        <finNFe>1</finNFe>
-        <indFinal>1</indFinal>
-        <indPres>1</indPres>
-        <procEmi>0</procEmi>
-        <verProc>1.0.0</verProc>
-      </ide>
-      <emit>
-        <CNPJ>${EMPRESA.cnpj}</CNPJ>
-        <xNome>${esc(EMPRESA.razao_social)}</xNome>
-        <xFant>${esc(EMPRESA.nome_fantasia)}</xFant>
-        <enderEmit>
-          <xLgr>${esc(EMPRESA.logradouro)}</xLgr>
-          <nro>${esc(EMPRESA.numero)}</nro>
-          <xBairro>${esc(EMPRESA.bairro)}</xBairro>
-          <cMun>3106705</cMun>
-          <xMun>${esc(EMPRESA.cidade)}</xMun>
-          <UF>${esc(EMPRESA.uf)}</UF>
-          <CEP>${somenteDigitos(EMPRESA.cep)}</CEP>
-          <cPais>1058</cPais>
-          <xPais>BRASIL</xPais>
-          <fone>${somenteDigitos(EMPRESA.fone)}</fone>
-        </enderEmit>
-        <IE>${somenteDigitos(EMPRESA.ie)}</IE>
-        <CRT>${esc(EMPRESA.crt)}</CRT>
-      </emit>${destXml}
-      ${itensXml}
-      <total>
-        <ICMSTot>
-          <vBC>0.00</vBC>
-          <vICMS>0.00</vICMS>
-          <vICMSDeson>0.00</vICMSDeson>
-          <vFCP>0.00</vFCP>
-          <vBCST>0.00</vBCST>
-          <vST>0.00</vST>
-          <vFCPST>0.00</vFCPST>
-          <vFCPSTRet>0.00</vFCPSTRet>
-          <vProd>${vProdTotal}</vProd>
-          <vFrete>0.00</vFrete>
-          <vSeg>0.00</vSeg>
-          <vDesc>${vDesc}</vDesc>
-          <vII>0.00</vII>
-          <vIPI>0.00</vIPI>
-          <vIPIDevol>0.00</vIPIDevol>
-          <vPIS>0.00</vPIS>
-          <vCOFINS>0.00</vCOFINS>
-          <vOutro>0.00</vOutro>
-          <vNF>${vNF}</vNF>
-          <vTotTrib>0.00</vTotTrib>
-        </ICMSTot>
-      </total>
-      <transp>
-        <modFrete>9</modFrete>
-      </transp>
-      <pag>${detPagXml}
-      </pag>
-      <infAdic>
-        <infCpl>BELA MODAS - SIMPLES NACIONAL - HOMOLOGACAO</infCpl>
-      </infAdic>
-    </infNFe>
-  </NFe>
-</nfeProc>`;
+<nfce>
+  <ide>
+    <cNF>${nota.numero}</cNF>
+    <natOp>VENDA DE MERCADORIA</natOp>
+    <mod>65</mod>
+    <serie>${nota.serie}</serie>
+    <nNF>${nota.numero}</nNF>
+    <dhEmi>${nota.dataEmissaoIso}</dhEmi>
+    <tpNF>1</tpNF>
+    <tpAmb>2</tpAmb>
+  </ide>
+  <emit>
+    <CNPJ>${EMPRESA.cnpj}</CNPJ>
+    <xNome>${esc(EMPRESA.razao_social)}</xNome>
+    <xFant>${esc(EMPRESA.nome_fantasia)}</xFant>
+    <IE>${esc(EMPRESA.ie)}</IE>
+    <CRT>${esc(EMPRESA.crt)}</CRT>
+    <enderEmit>
+      <xLgr>${esc(EMPRESA.logradouro)}</xLgr>
+      <nro>${esc(EMPRESA.numero)}</nro>
+      <xBairro>${esc(EMPRESA.bairro)}</xBairro>
+      <cMun>3106705</cMun>
+      <xMun>${esc(EMPRESA.cidade)}</xMun>
+      <UF>${esc(EMPRESA.uf)}</UF>
+      <CEP>${esc(EMPRESA.cep)}</CEP>
+      <cPais>1058</cPais>
+      <xPais>${esc(EMPRESA.pais)}</xPais>
+      <fone>${esc(EMPRESA.fone)}</fone>
+    </enderEmit>
+  </emit>
+  <dest>
+    <xNome>${esc(nota.cliente?.nome || "CONSUMIDOR NAO IDENTIFICADO")}</xNome>
+    <CPF>${esc(nota.cliente?.cpf || "")}</CPF>
+  </dest>
+  ${itensXml}
+  <total>
+    <ICMSTot>
+      <vProd>${dinheiro(nota.subtotal)}</vProd>
+      <vDesc>${dinheiro(nota.desconto)}</vDesc>
+      <vNF>${dinheiro(nota.total)}</vNF>
+    </ICMSTot>
+  </total>
+  <pag>
+    <detPag>
+      <tPag>${mapearFormaPagamentoFiscal(nota.pagamento?.tipo)}</tPag>
+      <vPag>${dinheiro(nota.pagamento?.valor || nota.total)}</vPag>
+    </detPag>
+  </pag>
+  <infAdic>
+    <infCpl>ESTRUTURA DE TESTE BELA MODAS - CERTIFICADO CARREGADO.</infCpl>
+  </infAdic>
+</nfce>`;
 }
 
 function nomeArquivoXML(nota) {
-  // Nome padrão SEFAZ: chave44 + "-nfe.xml"
-  const chave = nota.chaveAcesso || nota.chave || calcularChaveAcesso(nota);
-  return `${chave}-nfe.xml`;
+  const serie = String(nota.serie || 1).padStart(3, "0");
+  const numero = String(nota.numero || 0).padStart(9, "0");
+  return `${EMPRESA.cnpj}65${serie}${numero}.xml`;
 }
 
 function nomeArquivoXMLRegistro(r = {}) {
-  const chave = r.chaveAcesso || r.chave || calcularChaveAcesso(r);
-  return `${chave}-nfe.xml`;
+  const serie = String(r.serie || 1).padStart(3, "0");
+  const numero = String(r.numero || 0).padStart(9, "0");
+  return `${EMPRESA.cnpj}65${serie}${numero}.xml`;
 }
 
 // ================= ZIP XML =================
@@ -788,16 +553,19 @@ function makeZip(files) {
 // ================= HTML CUPOM =================
 
 function gerarHTML(nota) {
-  const itens = (nota.itens || []).map((item, index) => {
+  const itens = (nota.itens || []).map((item) => {
+    const codigoExibido = item.ean || item.codigo || "-";
+
     return `
-      <tr>
-        <td>${index + 1}</td>
-        <td>${esc(item.descricao || "")}</td>
-        <td style="text-align:center">${Number(item.quantidade || 0).toFixed(0)}</td>
-        <td style="text-align:right">R$ ${moeda(item.valorUnitario || 0)}</td>
-        <td style="text-align:right">R$ ${moeda(item.valorTotal || 0)}</td>
-      </tr>
-    `;
+<tr>
+  <td>${esc(item.descricao)}</td>
+  <td>${item.quantidade}</td>
+  <td>R$ ${moeda(item.valorTotal)}</td>
+</tr>
+<tr class="linha-codigo">
+  <td colspan="3">${esc(codigoExibido)}</td>
+</tr>
+`;
   }).join("");
 
   return `<!DOCTYPE html>
@@ -805,261 +573,203 @@ function gerarHTML(nota) {
 <head>
 <meta charset="UTF-8">
 <title>NFC-e ${nota.numero}</title>
-
 <style>
-@page{
-  size:80mm auto;
-  margin:0;
-}
-
 body{
   margin:0;
-  padding:10px;
-  background:#f4f4f4;
-  font-family:Arial,sans-serif;
-  color:#000;
+  padding:0;
+  background:#f5f5f5;
+  font-family:Arial, Helvetica, sans-serif;
 }
-
 .cupom{
   width:80mm;
-  margin:auto;
+  max-width:80mm;
+  margin:10px auto;
   background:#fff;
-  padding:12px;
-  border-radius:8px;
+  color:#000;
+  padding:8px;
   box-sizing:border-box;
+  font-size:12px;
 }
-
-.topo{
-  display:flex;
-  justify-content:space-between;
-  align-items:flex-start;
-  gap:10px;
+.center{text-align:center;}
+.logo{
+  width:70px;
+  max-height:70px;
+  object-fit:contain;
+  margin-bottom:6px;
 }
-
-.empresa{
-  flex:1;
-  text-align:center;
-}
-
-.empresa h1{
-  margin:0;
+.nome-loja{
   font-size:22px;
-}
-
-.empresa p{
-  margin:2px 0;
-  font-size:13px;
-}
-
-.box-nfce{
-  width:150px;
-  border:1px solid #ccc;
-  border-radius:8px;
-  padding:8px;
-  text-align:center;
-}
-
-.box-nfce h2{
-  margin:0;
-  font-size:18px;
-}
-
-.box-nfce .numero{
-  font-size:34px;
   font-weight:bold;
+  margin-bottom:4px;
 }
-
-.barra{
-  margin:12px 0;
-  background:#eee;
-  padding:8px;
-  text-align:center;
-  font-weight:bold;
-  border-radius:4px;
-  font-size:14px;
+.info-empresa{
+  line-height:1.4;
+  font-size:11px;
 }
-
-.cliente{
+.sep{
+  border-top:1px dashed #000;
   margin:10px 0;
-  font-size:14px;
 }
-
+.titulo{
+  text-align:center;
+  font-weight:bold;
+  font-size:14px;
+  margin:8px 0;
+}
+.info{
+  line-height:1.6;
+  font-size:12px;
+}
 table{
   width:100%;
   border-collapse:collapse;
-  font-size:12px;
+  margin-top:5px;
 }
-
 th{
-  border-top:1px solid #000;
   border-bottom:1px solid #000;
-  padding:6px 2px;
+  padding-bottom:4px;
+  font-size:11px;
   text-align:left;
 }
-
+th:last-child, td:last-child{text-align:right;}
+th:nth-child(2), td:nth-child(2){
+  text-align:center;
+  width:40px;
+}
 td{
-  padding:6px 2px;
-  border-bottom:1px dashed #ccc;
   vertical-align:top;
+  padding:3px 0;
+  font-size:11px;
 }
-
-.resumo{
-  margin-top:12px;
+.linha-codigo td{
+  font-size:10px;
+  color:#555;
+  padding-bottom:6px;
+  text-align:left;
+}
+.resumo{margin-top:10px;}
+.resumo-linha{
   display:flex;
   justify-content:space-between;
-  gap:10px;
+  margin-bottom:4px;
 }
-
-.total-box{
-  flex:1;
-}
-
-.total-box div{
-  margin-bottom:8px;
-}
-
-.total-final{
-  background:#f1f1f1;
-  padding:10px;
-  border-radius:6px;
-  font-size:18px;
+.total{
+  font-size:20px;
   font-weight:bold;
+  border-top:1px dashed #000;
+  border-bottom:1px dashed #000;
+  padding:8px 0;
+  margin-top:8px;
 }
-
-.pagamento-box{
-  width:210px;
-}
-
-.pagamento-card{
-  border:1px solid #ccc;
-  border-radius:6px;
-  padding:10px;
-  margin-bottom:10px;
+.pagamento{
+  margin-top:10px;
   text-align:center;
+  border:1px dashed #000;
+  padding:8px;
 }
-
-.pagamento-card strong{
-  display:block;
-  margin-bottom:6px;
-}
-
-.tributos{
-  margin-top:16px;
-  border:1px dashed #aaa;
-  border-radius:6px;
-  padding:10px;
-  text-align:center;
-  font-size:13px;
-}
-
-.info-final{
-  margin-top:16px;
-  border:1px dashed #ccc;
-  border-radius:6px;
-  padding:10px;
-  display:flex;
-  justify-content:space-between;
-  gap:12px;
-  font-size:13px;
-}
-
-.chave{
-  background:#f1f1f1;
-  padding:6px;
-  border-radius:4px;
-  word-break:break-all;
-  margin-top:6px;
-}
-
+.pagamento strong{font-size:14px;}
 .qrcode{
-  margin-top:16px;
+  margin-top:12px;
   text-align:center;
 }
-
+.qrcode-box{
+  width:120px;
+  height:120px;
+  border:1px solid #ccc;
+  margin:0 auto 8px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size:11px;
+}
+.chave{
+  font-size:10px;
+  word-break:break-all;
+  line-height:1.4;
+}
+.msg{
+  margin-top:12px;
+  text-align:center;
+  font-size:12px;
+  line-height:1.6;
+}
 .rodape{
-  margin-top:16px;
+  margin-top:12px;
+  font-size:10px;
   text-align:center;
-  border:1px solid #ddd;
-  border-radius:6px;
-  padding:12px;
-  font-size:14px;
+  color:#444;
 }
-
-.botoes{
-  text-align:center;
-  margin-top:14px;
+.btns{
+  margin-top:15px;
+  display:flex;
+  justify-content:center;
+  gap:8px;
 }
-
 button{
-  padding:8px 14px;
   border:none;
-  border-radius:6px;
-  background:#222;
+  background:#000;
   color:#fff;
+  padding:8px 12px;
+  border-radius:6px;
   cursor:pointer;
-  margin:0 4px;
+  font-size:12px;
 }
-
+@page{
+  size:80mm auto;
+  margin:2mm;
+}
 @media print{
-  body{
-    background:#fff;
-    padding:0;
-  }
-
+  body{background:#fff;}
   .cupom{
-    width:100%;
-    border-radius:0;
+    margin:0 auto;
+    width:80mm;
+    max-width:80mm;
   }
-
-  .botoes{
-    display:none;
-  }
+  .btns{display:none;}
 }
 </style>
 </head>
-
 <body>
 
 <div class="cupom">
 
-  <div class="topo">
+  <div class="center">
+    ${LOGO_URL ? `<img src="${LOGO_URL}" class="logo" alt="Logo Bela Modas">` : ""}
 
-    <div class="empresa">
-      <h1>${esc(EMPRESA.nome_fantasia)}</h1>
-      <p>${esc(EMPRESA.razao_social)}</p>
-      <p>CNPJ: ${formatarCNPJ(EMPRESA.cnpj)} &nbsp;&nbsp; IE: ${esc(EMPRESA.ie)}</p>
-      <p>${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)} - ${esc(EMPRESA.bairro)}</p>
-      <p>${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)} - CEP: ${formatarCEP(EMPRESA.cep)}</p>
-      <p>Tel: ${formatarTelefone(EMPRESA.fone)}</p>
+    <div class="nome-loja">
+      ${esc(EMPRESA.nome_fantasia)}
     </div>
 
-    <div class="box-nfce">
-      <h2>NFC-e</h2>
-      <div class="numero">${nota.numero}</div>
-      <div>SÉRIE: ${nota.serie}</div>
-      <div style="margin-top:8px;">EMISSÃO:</div>
-      <div>${esc(nota.dataEmissaoBR)}</div>
-      <div style="margin-top:8px;">VIA CONSUMIDOR</div>
+    <div class="info-empresa">
+      ${esc(EMPRESA.razao_social)}<br>
+      CNPJ ${formatarCNPJ(EMPRESA.cnpj)}<br>
+      IE ${esc(EMPRESA.ie)}<br>
+      ${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)}<br>
+      ${esc(EMPRESA.bairro)} - ${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)}<br>
+      CEP ${formatarCEP(EMPRESA.cep)}<br>
+      Tel ${formatarTelefone(EMPRESA.fone)}
     </div>
-
   </div>
 
-  <div class="barra">
-    DANFE NFC-e - Documento Auxiliar da Nota Fiscal de Consumidor Eletrônica
+  <div class="sep"></div>
+
+  <div class="titulo">DANFE NFC-e</div>
+
+  <div class="info">
+    <strong>Número:</strong> ${nota.numero}<br>
+    <strong>Série:</strong> ${nota.serie}<br>
+    <strong>Data:</strong> ${esc(nota.dataEmissaoBR)}<br>
+    <strong>Cliente:</strong> ${esc(nota.cliente?.nome || "Consumidor")}
   </div>
 
-  <div class="cliente">
-    <strong>Cliente:</strong> ${esc(nota.cliente?.nome || "Balcão")}
-  </div>
+  <div class="sep"></div>
 
   <table>
     <thead>
       <tr>
-        <th>CÓDIGO</th>
-        <th>DESCRIÇÃO</th>
-        <th>QTD</th>
-        <th>VL UNIT</th>
-        <th>VL TOTAL</th>
+        <th>Descrição</th>
+        <th>Qtd</th>
+        <th>Total</th>
       </tr>
     </thead>
     <tbody>
@@ -1067,80 +777,66 @@ button{
     </tbody>
   </table>
 
+  <div class="sep"></div>
+
   <div class="resumo">
-
-    <div class="total-box">
-      <div>QTD. ITENS: ${(nota.itens || []).length}</div>
-      <div>SUBTOTAL: R$ ${moeda(nota.subtotal || nota.total || 0)}</div>
-      <div>DESCONTO: R$ ${moeda(nota.desconto || 0)}</div>
-
-      <div class="total-final">
-        TOTAL: R$ ${moeda(nota.total || 0)}
-      </div>
+    <div class="resumo-linha">
+      <span>Qtd itens</span>
+      <span>${(nota.itens || []).reduce((s, item) => s + Number(item.quantidade || 0), 0)}</span>
     </div>
-
-    <div class="pagamento-box">
-
-      <div class="pagamento-card">
-        <strong>FORMA DE PAGAMENTO</strong>
-        ${esc(nota.pagamento?.tipo || "DINHEIRO")}
-      </div>
-
-      <div class="pagamento-card">
-        <strong>VALOR PAGO</strong>
-        R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}
-      </div>
-
+    <div class="resumo-linha">
+      <span>Subtotal</span>
+      <span>R$ ${moeda(nota.subtotal || 0)}</span>
     </div>
-
+    <div class="resumo-linha">
+      <span>Desconto</span>
+      <span>R$ ${moeda(nota.desconto || 0)}</span>
+    </div>
+    <div class="resumo-linha total">
+      <span>TOTAL</span>
+      <span>R$ ${moeda(nota.total || 0)}</span>
+    </div>
   </div>
 
-  <div class="tributos">
-    <strong>INFORMAÇÕES DOS TRIBUTOS</strong><br><br>
-    Tributos Totais (Lei Federal 12.741/2012)<br>
-    R$ ${moeda(nota.valorTributos || 0)}
-  </div>
-
-  <div style="margin-top:12px;text-align:center;font-size:13px;font-weight:bold;">
-    DOCUMENTO EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL<br>
-    NÃO GERA DIREITO A CRÉDITO FISCAL DE ICMS, ISS E IPI
-  </div>
-
-  <div class="info-final">
-
-    <div>
-      <div>Número: ${nota.numero}</div>
-      <div>Série: ${nota.serie}</div>
-      <div>Data de Emissão: ${esc(nota.dataEmissaoBR)}</div>
-      <div>Status: ${esc(nota.status || "EMITIDA")}</div>
+  <div class="pagamento">
+    <div>Forma pagamento</div>
+    <strong>${esc(nota.pagamento?.tipo || "DINHEIRO")}</strong>
+    <div style="margin-top:5px;">
+      Valor pago: R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}
     </div>
-
-    <div>
-      <div><strong>Ambiente:</strong> HOMOLOGAÇÃO</div>
-      <div style="margin-top:10px;"><strong>Chave de Acesso</strong></div>
-      <div class="chave">
-        ${esc(nota.chave || "")}
-      </div>
-    </div>
-
   </div>
 
   <div class="qrcode">
-    <p>Consulte pela chave de acesso em:</p>
-    <strong>www.nfce.fazenda.mg.gov.br/portalnfce</strong>
+    <div class="qrcode-box">QR CODE NFC-e</div>
+
+    <div style="font-size:11px;line-height:1.5;">
+      Consulte pela chave de acesso em:<br>
+      <strong>www.nfce.fazenda.mg.gov.br/portalnfce</strong>
+    </div>
+
+    <div class="chave">
+      ${esc(nota.chave || nota.id)}
+    </div>
   </div>
+
+  <div class="msg">
+    Obrigado pela preferência!<br>
+    Volte sempre.
+  </div>
+
+  <div class="sep"></div>
 
   <div class="rodape">
-    <strong>MENSAGEM AO CONSUMIDOR</strong><br>
-    Obrigado pela preferência!<br>
-    Volte sempre!
+    Documento emitido por ME/EPP optante pelo Simples Nacional.<br>
+    Ambiente de homologação.<br><br>
+    Impresso em ${esc(nota.dataEmissaoBR)}
   </div>
 
-  <div class="botoes">
-    <button onclick="window.print()">Imprimir</button>
-    <button onclick="window.close()">Fechar</button>
-  </div>
+</div>
 
+<div class="btns">
+  <button onclick="window.print()">Imprimir</button>
+  <button onclick="window.close()">Fechar</button>
 </div>
 
 </body>
@@ -1385,21 +1081,17 @@ app.post("/nfce/emitir", async (req, res) => {
 
     const dataEmissaoIso = new Date().toISOString();
 
-    // Calcula chave de acesso antes de montar a nota
-    const chaveAcesso = calcularChaveAcesso({ numero, serie, dataEmissaoIso });
-
     const nota = {
       ...venda,
       id,
       numero,
       serie,
-      chaveAcesso,
       dataEmissaoIso,
       dataEmissaoBR: agoraBR(),
       mesRef: dataMesRef(dataEmissaoIso),
       diaRef: dataDiaRef(dataEmissaoIso),
       status: "emitida_homologacao",
-      chave: chaveAcesso
+      chave: id
     };
 
     nota.pdf_url = `${BASE_URL}/nfce/${encodeURIComponent(id)}/pdf`;
@@ -1559,239 +1251,3 @@ ensureDirs()
     console.error("Falha ao iniciar API:", err);
     process.exit(1);
   });
-
-
-// ================= CONFIG SIMPLES NACIONAL =================
-
-const CRT = "1";
-const CSOSN_PADRAO = "102";
-
-function gerarBlocoICMS_SN() {
-  return `
-  <ICMS>
-    <ICMSSN102>
-      <orig>0</orig>
-      <CSOSN>${CSOSN_PADRAO}</CSOSN>
-    </ICMSSN102>
-  </ICMS>
-  `;
-}
-
-function gerarBlocoPIS_SN() {
-  return `
-  <PIS>
-    <PISNT>
-      <CST>49</CST>
-    </PISNT>
-  </PIS>
-  `;
-}
-
-function gerarBlocoCOFINS_SN() {
-  return `
-  <COFINS>
-    <COFINSNT>
-      <CST>49</CST>
-    </COFINSNT>
-  </COFINS>
-  `;
-}
-
-function gerarVTotTrib(valor) {
-  return (Number(valor || 0) * 0.12).toFixed(2);
-}
-
-// Ambiente homologação padrão
-const NFE_AMBIENTE = process.env.NFE_AMBIENTE || "2";
-
-// Preparado para futura integração SEFAZ
-// pendente:
-// - SOAP
-// - envio lote
-// - retorno autorização
-// - consulta recibo
-// - CSC produção
-
-
-// ================= XML ENVIO / AUTORIZADO =================
-
-function montarXMLAutorizado(xmlNFe, protocolo = "000000000000000") {
-  return `
-<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
-${xmlNFe}
-
-<protNFe versao="4.00">
-  <infProt>
-    <tpAmb>2</tpAmb>
-    <verAplic>Bela Caixa NFC-e 2.6</verAplic>
-    <chNFe></chNFe>
-    <dhRecbto>${new Date().toISOString()}</dhRecbto>
-    <nProt>${protocolo}</nProt>
-    <digVal></digVal>
-    <cStat>100</cStat>
-    <xMotivo>Autorizado o uso da NF-e</xMotivo>
-  </infProt>
-</protNFe>
-
-</nfeProc>
-`;
-}
-
-
-// ================= cNF RANDOMICO =================
-
-function gerarCodigoNumericoNFCE() {
-  return String(
-    Math.floor(10000000 + Math.random() * 90000000)
-  );
-}
-
-
-// ================= DV CHAVE ACESSO =================
-
-function calcularDVChave(chave43) {
-  let soma = 0;
-  let peso = 2;
-
-  for (let i = chave43.length - 1; i >= 0; i--) {
-    soma += Number(chave43[i]) * peso;
-    peso = peso === 9 ? 2 : peso + 1;
-  }
-
-  const resto = soma % 11;
-  return resto < 2 ? 0 : 11 - resto;
-}
-
-
-// ================= QRCode NFC-e =================
-
-function gerarInfNFeSupl(urlQRCode) {
-  return `
-<infNFeSupl>
-  <qrCode><![CDATA[${urlQRCode}]]></qrCode>
-  <urlChave>
-    https://www.hom.nfce.fazenda.mg.gov.br/portalnfce
-  </urlChave>
-</infNFeSupl>
-`;
-}
-
-
-// ================= ASSINATURA XML =================
-
-function inserirAssinaturaFake(xml) {
-  return xml + `
-<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
-  <SignedInfo></SignedInfo>
-  <SignatureValue>ASSINATURA_PENDENTE</SignatureValue>
-</Signature>
-`;
-}
-
-// ================= ASSINATURA XML REAL =================
-
-function assinarXMLReal(xml, privateKeyPem, certPem, refId) {
-  try {
-    const sig = new SignedXml();
-
-    sig.privateKey = privateKeyPem;
-
-    sig.addReference({
-      xpath: `//*[@Id='${refId}']`,
-      transforms: [
-        "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
-        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
-      ],
-      digestAlgorithm:
-        "http://www.w3.org/2001/04/xmlenc#sha256"
-    });
-
-    sig.signatureAlgorithm =
-      "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
-
-    sig.canonicalizationAlgorithm =
-      "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
-
-    sig.keyInfoProvider = {
-      getKeyInfo() {
-        return `<X509Data><X509Certificate>${
-          certPem
-            .replace(/-----BEGIN CERTIFICATE-----/g, "")
-            .replace(/-----END CERTIFICATE-----/g, "")
-            .replace(/\\r?\\n|\\r/g, "")
-        }</X509Certificate></X509Data>`;
-      }
-    };
-
-    sig.computeSignature(xml);
-
-    return sig.getSignedXml();
-  } catch (e) {
-    console.error("Erro assinatura XML:", e);
-    return xml;
-  }
-}
-
-// ================= CERTIFICADO DIGITAL =================
-
-function carregarCertificadoPFX(certBase64, senha) {
-  try {
-    const p12Der = forge.util.decode64(certBase64);
-
-    const p12Asn1 = forge.asn1.fromDer(p12Der);
-
-    const p12 = forge.pkcs12.pkcs12FromAsn1(
-      p12Asn1,
-      senha
-    );
-
-    const bags =
-      p12.getBags({
-        bagType: forge.pki.oids.pkcs8ShroudedKeyBag
-      });
-
-    const keyObj =
-      bags[forge.pki.oids.pkcs8ShroudedKeyBag][0];
-
-    const certBags =
-      p12.getBags({
-        bagType: forge.pki.oids.certBag
-      });
-
-    const certObj =
-      certBags[forge.pki.oids.certBag][0];
-
-    return {
-      privateKeyPem:
-        forge.pki.privateKeyToPem(keyObj.key),
-
-      certPem:
-        forge.pki.certificateToPem(certObj.cert)
-    };
-  } catch (e) {
-    console.error("Erro certificado:", e);
-    return null;
-  }
-}
-
-// ================= QRCODE OFICIAL MG =================
-
-function gerarHashCSC(chave, CSC) {
-  return crypto
-    .createHash("sha1")
-    .update(chave + CSC)
-    .digest("hex");
-}
-
-function gerarQRCodeOficial(
-  chave,
-  tpAmb,
-  valor,
-  digest,
-  CSC,
-  CSC_ID
-) {
-  const hash = gerarHashCSC(chave, CSC);
-
-  return `https://www.hom.nfce.fazenda.mg.gov.br/portalnfce/sistema/qrcode.xhtml?p=${chave}|${tpAmb}|${CSC_ID}|${valor}|${digest}|${hash}`;
-}
