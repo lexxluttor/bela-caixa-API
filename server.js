@@ -321,6 +321,11 @@ function obterProdutoFiscal(item = {}) {
     ncm: String(item.ncm || "00000000"),
     cfop: String(item.cfop || "5102"),
     csosn: String(item.csosn || "102"),
+    cest: String(item.cest || ""),
+    cst_pis: String(item.cst_pis || item.cstPis || "49"),
+    aliq_pis: toNumber(item.aliq_pis ?? item.aliqPis, 0),
+    cst_cofins: String(item.cst_cofins || item.cstCofins || "49"),
+    aliq_cofins: toNumber(item.aliq_cofins ?? item.aliqCofins, 0),
     unidade: String(item.unidade || "UN"),
     origem: String(item.origem || "0"),
     quantidade: qtd,
@@ -364,13 +369,19 @@ function normalizarPayload(body = {}) {
 // ================= XML =================
 
 function gerarXML(nota) {
-  const itensXml = (nota.itens || []).map((item, idx) => `
+  const itensXml = (nota.itens || []).map((item, idx) => {
+  const cestXml = item.cest ? `\n        <CEST>${esc(item.cest)}</CEST>` : "";
+  const cstPis = esc(item.cst_pis || "49");
+  const aliqPis = dinheiro(item.aliq_pis || 0);
+  const cstCofins = esc(item.cst_cofins || "49");
+  const aliqCofins = dinheiro(item.aliq_cofins || 0);
+  return `
     <det nItem="${idx + 1}">
       <prod>
         <cProd>${esc(item.codigo || String(idx + 1))}</cProd>
         <cEAN>${esc(item.ean || "SEM GTIN")}</cEAN>
         <xProd>${esc(item.descricao)}</xProd>
-        <NCM>${esc(item.ncm)}</NCM>
+        <NCM>${esc(item.ncm)}</NCM>${cestXml}
         <CFOP>${esc(item.cfop)}</CFOP>
         <uCom>${esc(item.unidade)}</uCom>
         <qCom>${dinheiro(item.quantidade)}</qCom>
@@ -384,9 +395,26 @@ function gerarXML(nota) {
             <CSOSN>${esc(item.csosn)}</CSOSN>
           </ICMSSN102>
         </ICMS>
+        <PIS>
+          <PISOutr>
+            <CST>${cstPis}</CST>
+            <vBC>0.00</vBC>
+            <pPIS>${aliqPis}</pPIS>
+            <vPIS>0.00</vPIS>
+          </PISOutr>
+        </PIS>
+        <COFINS>
+          <COFINSOutr>
+            <CST>${cstCofins}</CST>
+            <vBC>0.00</vBC>
+            <pCOFINS>${aliqCofins}</pCOFINS>
+            <vCOFINS>0.00</vCOFINS>
+          </COFINSOutr>
+        </COFINS>
       </imposto>
     </det>
-  `).join("");
+  `;
+  }).join("");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <nfce>
