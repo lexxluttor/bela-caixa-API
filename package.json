@@ -1,7 +1,7 @@
 {
   "name": "bela-caixa-api",
-  "version": "2.3.0",
-  "description": "API da Bela Modas com persistência em disco, cupom térmico e XML por mês/período",
+  "version": "3.0.0",
+  "description": "API fiscal NFC-e Bela Modas",
   "main": "server.js",
   "type": "module",
   "scripts": {

@@ -13,7 +13,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 10000;
 const BASE_URL = process.env.BASE_URL || "https://bela-caixa-api.onrender.com";
 const LOGO_URL = process.env.LOGO_URL || "";
 const API_BELA_SHEETS = process.env.API_BELA_SHEETS || "";
