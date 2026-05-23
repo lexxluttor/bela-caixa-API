@@ -50,6 +50,21 @@ const EMPRESA = {
   pais: "BRASIL"
 };
 
+const NFCE_CONFIG = {
+  cUF: "31",
+  cMunFG: "3106705",
+  modelo: "65",
+  seriePadrao: 1,
+  tpAmb: "2", // 1=produção, 2=homologação
+  tpEmis: "1", // 1=normal
+  tpImp: "4", // DANFE NFC-e
+  finNFe: "1",
+  indFinal: "1",
+  indPres: "1",
+  procEmi: "0",
+  verProc: "Bela Caixa 1.0"
+};
+
 let sequencial = 1;
 
 // ================= AUXILIARES =================
@@ -151,6 +166,120 @@ async function fetchJson(url, options = {}) {
 function pad2(v) {
   return String(v).padStart(2, "0");
 }
+
+
+function padLeft(v, tamanho) {
+  return String(v || "").padStart(tamanho, "0");
+}
+
+function somenteNumerosValor(v, tamanho) {
+  return padLeft(somenteDigitos(v), tamanho).slice(-tamanho);
+}
+
+function calcularModulo11Chave(chave43) {
+  const pesos = [2, 3, 4, 5, 6, 7, 8, 9];
+  let soma = 0;
+  let pesoIndex = 0;
+
+  for (let i = chave43.length - 1; i >= 0; i--) {
+    soma += Number(chave43[i]) * pesos[pesoIndex];
+    pesoIndex = (pesoIndex + 1) % pesos.length;
+  }
+
+  const resto = soma % 11;
+  const dv = 11 - resto;
+
+  return dv === 10 || dv === 11 ? 0 : dv;
+}
+
+function gerarCodigoNumerico(numero, vendaId) {
+  const base = somenteDigitos(String(vendaId || "")) || String(numero || Date.now());
+  const combinado = String(base + Date.now()).slice(-8);
+  return padLeft(combinado, 8);
+}
+
+function gerarChaveAcesso({ dataEmissaoIso, numero, serie, cNF }) {
+  const d = new Date(dataEmissaoIso || Date.now());
+  const ano = String(d.getFullYear()).slice(-2);
+  const mes = pad2(d.getMonth() + 1);
+
+  const chave43 =
+    NFCE_CONFIG.cUF +
+    ano +
+    mes +
+    somenteNumerosValor(EMPRESA.cnpj, 14) +
+    NFCE_CONFIG.modelo +
+    padLeft(serie, 3) +
+    padLeft(numero, 9) +
+    NFCE_CONFIG.tpEmis +
+    padLeft(cNF, 8);
+
+  return chave43 + calcularModulo11Chave(chave43);
+}
+
+function formatarDhEmi(iso) {
+  const d = new Date(iso || Date.now());
+
+  const partes = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(d).replace(" ", "T");
+
+  return partes + "-03:00";
+}
+
+function tagEAN(v) {
+  const ean = somenteDigitos(v || "");
+  return ean ? ean : "SEM GTIN";
+}
+
+function quantidadeFiscal(v) {
+  return Number(v || 0).toFixed(4);
+}
+
+function valorUnitarioFiscal(v) {
+  return Number(v || 0).toFixed(10);
+}
+
+function calcularTotaisFiscais(nota) {
+  const itens = nota.itens || [];
+
+  const vProd = itens.reduce((s, i) => s + Number(i.valorTotal || 0), 0);
+  const vDesc = Number(nota.desconto || 0);
+  const vPIS = itens.reduce((s, i) => s + Number(i.valorPIS || 0), 0);
+  const vCOFINS = itens.reduce((s, i) => s + Number(i.valorCOFINS || 0), 0);
+  const vTotTrib = itens.reduce((s, i) => s + Number(i.vTotTrib || 0), 0);
+
+  return {
+    vBC: 0,
+    vICMS: 0,
+    vICMSDeson: 0,
+    vFCP: 0,
+    vBCST: 0,
+    vST: 0,
+    vFCPST: 0,
+    vFCPSTRet: 0,
+    vProd,
+    vFrete: 0,
+    vSeg: 0,
+    vDesc,
+    vII: 0,
+    vIPI: 0,
+    vIPIDevol: 0,
+    vPIS,
+    vCOFINS,
+    vOutro: 0,
+    vNF: Number(nota.total || (vProd - vDesc)),
+    vTotTrib
+  };
+}
+
 
 function normalizarMes(ano, mes) {
   const a = Number(ano);
@@ -316,7 +445,8 @@ function obterProdutoFiscal(item = {}) {
 
   return {
     codigo: String(item.cod || item.codigo || item.ref || item.id || ""),
-    ean: String(item.ean || item.codigo_barras || item.codBarras || item.codigoDeBarras || ""),
+    ean: tagEAN(item.ean || item.codigo_barras || item.codBarras || item.codigoDeBarras || ""),
+    eanTrib: tagEAN(item.eanTrib || item.ean_trib || item.ean || item.codigo_barras || item.codBarras || item.codigoDeBarras || ""),
     descricao: String(item.descricao || item.nome || item.desc || "PRODUTO"),
     ncm: String(item.ncm || "00000000"),
     cfop: String(item.cfop || "5102"),
@@ -327,6 +457,13 @@ function obterProdutoFiscal(item = {}) {
     cst_cofins: String(item.cst_cofins || item.cstCofins || "49"),
     aliq_cofins: toNumber(item.aliq_cofins ?? item.aliqCofins, 0),
     unidade: String(item.unidade || "UN"),
+    unidadeTrib: String(item.unidadeTrib || item.unidade_trib || item.unidade || "UN"),
+    quantidadeTrib: Number(item.quantidadeTrib ?? item.quantidade_trib ?? qtd),
+    valorUnitarioTrib: Number(item.valorUnitarioTrib ?? item.valor_unitario_trib ?? valorUnitario),
+    indTot: String(item.indTot || "1"),
+    vTotTrib: toNumber(item.vTotTrib ?? item.valorTributos, 0),
+    valorPIS: 0,
+    valorCOFINS: 0,
     origem: String(item.origem || "0"),
     quantidade: qtd,
     valorUnitario,
@@ -369,13 +506,26 @@ function normalizarPayload(body = {}) {
 // ================= XML =================
 
 function gerarXML(nota) {
+  const chave = nota.chaveAcesso || nota.chave || "";
+  const infNFeId = "NFe" + chave;
+  const dhEmi = formatarDhEmi(nota.dataEmissaoIso);
+  const totais = calcularTotaisFiscais(nota);
+
   const itensXml = (nota.itens || []).map((item, idx) => {
-  const cestXml = item.cest ? `\n        <CEST>${esc(item.cest)}</CEST>` : "";
-  const cstPis = esc(item.cst_pis || "49");
-  const aliqPis = dinheiro(item.aliq_pis || 0);
-  const cstCofins = esc(item.cst_cofins || "49");
-  const aliqCofins = dinheiro(item.aliq_cofins || 0);
-  return `
+    const cestXml = item.cest ? `
+        <CEST>${esc(item.cest)}</CEST>` : "";
+
+    const cstPis = esc(item.cst_pis || "49");
+    const aliqPis = dinheiro(item.aliq_pis || 0);
+    const cstCofins = esc(item.cst_cofins || "49");
+    const aliqCofins = dinheiro(item.aliq_cofins || 0);
+
+    const vTotTribXml = Number(item.vTotTrib || 0) > 0
+      ? `
+        <vTotTrib>${dinheiro(item.vTotTrib)}</vTotTrib>`
+      : "";
+
+    return `
     <det nItem="${idx + 1}">
       <prod>
         <cProd>${esc(item.codigo || String(idx + 1))}</cProd>
@@ -384,15 +534,20 @@ function gerarXML(nota) {
         <NCM>${esc(item.ncm)}</NCM>${cestXml}
         <CFOP>${esc(item.cfop)}</CFOP>
         <uCom>${esc(item.unidade)}</uCom>
-        <qCom>${dinheiro(item.quantidade)}</qCom>
-        <vUnCom>${dinheiro(item.valorUnitario)}</vUnCom>
+        <qCom>${quantidadeFiscal(item.quantidade)}</qCom>
+        <vUnCom>${valorUnitarioFiscal(item.valorUnitario)}</vUnCom>
         <vProd>${dinheiro(item.valorTotal)}</vProd>
+        <cEANTrib>${esc(item.eanTrib || item.ean || "SEM GTIN")}</cEANTrib>
+        <uTrib>${esc(item.unidadeTrib || item.unidade)}</uTrib>
+        <qTrib>${quantidadeFiscal(item.quantidadeTrib || item.quantidade)}</qTrib>
+        <vUnTrib>${valorUnitarioFiscal(item.valorUnitarioTrib || item.valorUnitario)}</vUnTrib>
+        <indTot>${esc(item.indTot || "1")}</indTot>
       </prod>
-      <imposto>
+      <imposto>${vTotTribXml}
         <ICMS>
           <ICMSSN102>
             <orig>${esc(item.origem)}</orig>
-            <CSOSN>${esc(item.csosn)}</CSOSN>
+            <CSOSN>${esc(item.csosn || "102")}</CSOSN>
           </ICMSSN102>
         </ICMS>
         <PIS>
@@ -416,59 +571,100 @@ function gerarXML(nota) {
   `;
   }).join("");
 
+  const destCpf = somenteDigitos(nota.cliente?.cpf || "");
+
+  const destXml = destCpf
+    ? `
+    <dest>
+      <CPF>${esc(destCpf)}</CPF>
+      <xNome>${esc(nota.cliente?.nome || "CONSUMIDOR")}</xNome>
+      <indIEDest>9</indIEDest>
+    </dest>`
+    : "";
+
   return `<?xml version="1.0" encoding="UTF-8"?>
-<nfce>
-  <ide>
-    <cNF>${nota.numero}</cNF>
-    <natOp>VENDA DE MERCADORIA</natOp>
-    <mod>65</mod>
-    <serie>${nota.serie}</serie>
-    <nNF>${nota.numero}</nNF>
-    <dhEmi>${nota.dataEmissaoIso}</dhEmi>
-    <tpNF>1</tpNF>
-    <tpAmb>2</tpAmb>
-  </ide>
-  <emit>
-    <CNPJ>${EMPRESA.cnpj}</CNPJ>
-    <xNome>${esc(EMPRESA.razao_social)}</xNome>
-    <xFant>${esc(EMPRESA.nome_fantasia)}</xFant>
-    <IE>${esc(EMPRESA.ie)}</IE>
-    <CRT>${esc(EMPRESA.crt)}</CRT>
-    <enderEmit>
-      <xLgr>${esc(EMPRESA.logradouro)}</xLgr>
-      <nro>${esc(EMPRESA.numero)}</nro>
-      <xBairro>${esc(EMPRESA.bairro)}</xBairro>
-      <cMun>3106705</cMun>
-      <xMun>${esc(EMPRESA.cidade)}</xMun>
-      <UF>${esc(EMPRESA.uf)}</UF>
-      <CEP>${esc(EMPRESA.cep)}</CEP>
-      <cPais>1058</cPais>
-      <xPais>${esc(EMPRESA.pais)}</xPais>
-      <fone>${esc(EMPRESA.fone)}</fone>
-    </enderEmit>
-  </emit>
-  <dest>
-    <xNome>${esc(nota.cliente?.nome || "CONSUMIDOR NAO IDENTIFICADO")}</xNome>
-    <CPF>${esc(nota.cliente?.cpf || "")}</CPF>
-  </dest>
-  ${itensXml}
-  <total>
-    <ICMSTot>
-      <vProd>${dinheiro(nota.subtotal)}</vProd>
-      <vDesc>${dinheiro(nota.desconto)}</vDesc>
-      <vNF>${dinheiro(nota.total)}</vNF>
-    </ICMSTot>
-  </total>
-  <pag>
-    <detPag>
-      <tPag>${mapearFormaPagamentoFiscal(nota.pagamento?.tipo)}</tPag>
-      <vPag>${dinheiro(nota.pagamento?.valor || nota.total)}</vPag>
-    </detPag>
-  </pag>
-  <infAdic>
-    <infCpl>ESTRUTURA DE TESTE BELA MODAS - CERTIFICADO CARREGADO.</infCpl>
-  </infAdic>
-</nfce>`;
+<NFe xmlns="http://www.portalfiscal.inf.br/nfe">
+  <infNFe Id="${infNFeId}" versao="4.00">
+    <ide>
+      <cUF>${NFCE_CONFIG.cUF}</cUF>
+      <cNF>${esc(nota.cNF)}</cNF>
+      <natOp>VENDA DE MERCADORIA</natOp>
+      <mod>${NFCE_CONFIG.modelo}</mod>
+      <serie>${nota.serie}</serie>
+      <nNF>${nota.numero}</nNF>
+      <dhEmi>${dhEmi}</dhEmi>
+      <tpNF>1</tpNF>
+      <idDest>1</idDest>
+      <cMunFG>${NFCE_CONFIG.cMunFG}</cMunFG>
+      <tpImp>${NFCE_CONFIG.tpImp}</tpImp>
+      <tpEmis>${NFCE_CONFIG.tpEmis}</tpEmis>
+      <cDV>${esc(nota.cDV)}</cDV>
+      <tpAmb>${NFCE_CONFIG.tpAmb}</tpAmb>
+      <finNFe>${NFCE_CONFIG.finNFe}</finNFe>
+      <indFinal>${NFCE_CONFIG.indFinal}</indFinal>
+      <indPres>${NFCE_CONFIG.indPres}</indPres>
+      <procEmi>${NFCE_CONFIG.procEmi}</procEmi>
+      <verProc>${esc(NFCE_CONFIG.verProc)}</verProc>
+    </ide>
+    <emit>
+      <CNPJ>${EMPRESA.cnpj}</CNPJ>
+      <xNome>${esc(EMPRESA.razao_social)}</xNome>
+      <xFant>${esc(EMPRESA.nome_fantasia)}</xFant>
+      <enderEmit>
+        <xLgr>${esc(EMPRESA.logradouro)}</xLgr>
+        <nro>${esc(EMPRESA.numero)}</nro>
+        <xBairro>${esc(EMPRESA.bairro)}</xBairro>
+        <cMun>${NFCE_CONFIG.cMunFG}</cMun>
+        <xMun>${esc(EMPRESA.cidade)}</xMun>
+        <UF>${esc(EMPRESA.uf)}</UF>
+        <CEP>${esc(EMPRESA.cep)}</CEP>
+        <cPais>1058</cPais>
+        <xPais>${esc(EMPRESA.pais)}</xPais>
+        <fone>${esc(EMPRESA.fone)}</fone>
+      </enderEmit>
+      <IE>${esc(EMPRESA.ie)}</IE>
+      <CRT>${esc(EMPRESA.crt)}</CRT>
+    </emit>${destXml}
+${itensXml}
+    <total>
+      <ICMSTot>
+        <vBC>${dinheiro(totais.vBC)}</vBC>
+        <vICMS>${dinheiro(totais.vICMS)}</vICMS>
+        <vICMSDeson>${dinheiro(totais.vICMSDeson)}</vICMSDeson>
+        <vFCP>${dinheiro(totais.vFCP)}</vFCP>
+        <vBCST>${dinheiro(totais.vBCST)}</vBCST>
+        <vST>${dinheiro(totais.vST)}</vST>
+        <vFCPST>${dinheiro(totais.vFCPST)}</vFCPST>
+        <vFCPSTRet>${dinheiro(totais.vFCPSTRet)}</vFCPSTRet>
+        <vProd>${dinheiro(totais.vProd)}</vProd>
+        <vFrete>${dinheiro(totais.vFrete)}</vFrete>
+        <vSeg>${dinheiro(totais.vSeg)}</vSeg>
+        <vDesc>${dinheiro(totais.vDesc)}</vDesc>
+        <vII>${dinheiro(totais.vII)}</vII>
+        <vIPI>${dinheiro(totais.vIPI)}</vIPI>
+        <vIPIDevol>${dinheiro(totais.vIPIDevol)}</vIPIDevol>
+        <vPIS>${dinheiro(totais.vPIS)}</vPIS>
+        <vCOFINS>${dinheiro(totais.vCOFINS)}</vCOFINS>
+        <vOutro>${dinheiro(totais.vOutro)}</vOutro>
+        <vNF>${dinheiro(totais.vNF)}</vNF>
+        <vTotTrib>${dinheiro(totais.vTotTrib)}</vTotTrib>
+      </ICMSTot>
+    </total>
+    <transp>
+      <modFrete>9</modFrete>
+    </transp>
+    <pag>
+      <detPag>
+        <indPag>0</indPag>
+        <tPag>${mapearFormaPagamentoFiscal(nota.pagamento?.tipo)}</tPag>
+        <vPag>${dinheiro(nota.pagamento?.valor || nota.total)}</vPag>
+      </detPag>
+    </pag>
+    <infAdic>
+      <infCpl>DOCUMENTO EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL. AMBIENTE DE HOMOLOGACAO.</infCpl>
+    </infAdic>
+  </infNFe>
+</NFe>`;
 }
 
 function nomeArquivoXML(nota) {
@@ -1108,18 +1304,28 @@ app.post("/nfce/emitir", async (req, res) => {
     }
 
     const dataEmissaoIso = new Date().toISOString();
+    const cNF = gerarCodigoNumerico(numero, id);
+    const chaveAcesso = gerarChaveAcesso({
+      dataEmissaoIso,
+      numero,
+      serie,
+      cNF
+    });
 
     const nota = {
       ...venda,
       id,
       numero,
       serie,
+      cNF,
+      cDV: chaveAcesso.slice(-1),
+      chaveAcesso,
       dataEmissaoIso,
       dataEmissaoBR: agoraBR(),
       mesRef: dataMesRef(dataEmissaoIso),
       diaRef: dataDiaRef(dataEmissaoIso),
       status: "emitida_homologacao",
-      chave: id
+      chave: chaveAcesso
     };
 
     nota.pdf_url = `${BASE_URL}/nfce/${encodeURIComponent(id)}/pdf`;
