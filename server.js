@@ -4,6 +4,7 @@ import zlib from "zlib";
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
+import crypto from "crypto";
 
 const app = express();
 app.use(cors());
@@ -62,7 +63,17 @@ const NFCE_CONFIG = {
   indFinal: "1",
   indPres: "1",
   procEmi: "0",
-  verProc: "Bela Caixa 1.0"
+  verProc: "Bela Caixa 1.0",
+  urlConsulta: "https://portalsped.fazenda.mg.gov.br/portalnfce"
+};
+
+// Para NFC-e real, informe no Render:
+ // CSC_ID=000001
+ // CSC_TOKEN=token_csc_fornecido_pela_sefaz_mg
+ // Em homologação, sem CSC configurado, a API gera QR Code técnico de teste.
+const CSC_CONFIG = {
+  id: process.env.CSC_ID || "",
+  token: process.env.CSC_TOKEN || ""
 };
 
 let sequencial = 1;
@@ -280,6 +291,36 @@ function calcularTotaisFiscais(nota) {
   };
 }
 
+
+
+function sha1Hex(valor) {
+  return crypto.createHash("sha1").update(String(valor), "utf8").digest("hex");
+}
+
+function gerarUrlQRCodeNfce(nota) {
+  const chave = nota.chaveAcesso || nota.chave || "";
+  const versaoQrCode = "2";
+  const tpAmb = (typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.tpAmb) ? NFCE_CONFIG.tpAmb : "2";
+  const urlConsulta = (typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.urlConsulta)
+    ? NFCE_CONFIG.urlConsulta
+    : "https://portalsped.fazenda.mg.gov.br/portalnfce";
+
+  const idCsc = CSC_CONFIG.id || "000000";
+  const tokenCsc = CSC_CONFIG.token || "";
+
+  const baseQr = `${chave}|${versaoQrCode}|${tpAmb}|${idCsc}`;
+  const hash = tokenCsc ? sha1Hex(baseQr + tokenCsc) : "HOMOLOGACAO_SEM_CSC";
+
+  return `${urlConsulta}/sistema/qrcode.xhtml?p=${baseQr}|${hash}`;
+}
+
+function gerarImagemQRCodeUrl(conteudo) {
+  return "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + encodeURIComponent(conteudo || "");
+}
+
+function textoHomologacao() {
+  return "EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL";
+}
 
 function normalizarMes(ano, mes) {
   const a = Number(ano);
@@ -510,6 +551,7 @@ function gerarXML(nota) {
   const infNFeId = "NFe" + chave;
   const dhEmi = formatarDhEmi(nota.dataEmissaoIso);
   const totais = calcularTotaisFiscais(nota);
+  const qrCodeUrl = nota.qrCodeUrl || gerarUrlQRCodeNfce(nota);
 
   const itensXml = (nota.itens || []).map((item, idx) => {
     const cestXml = item.cest ? `
@@ -661,9 +703,13 @@ ${itensXml}
       </detPag>
     </pag>
     <infAdic>
-      <infCpl>DOCUMENTO EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL. AMBIENTE DE HOMOLOGACAO.</infCpl>
+      <infCpl>DOCUMENTO EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL. ${textoHomologacao()}.</infCpl>
     </infAdic>
   </infNFe>
+  <infNFeSupl>
+    <qrCode><![CDATA[${qrCodeUrl}]]></qrCode>
+    <urlChave>${NFCE_CONFIG.urlConsulta}</urlChave>
+  </infNFeSupl>
 </NFe>`;
 }
 
@@ -1031,15 +1077,17 @@ button{
   </div>
 
   <div class="qrcode">
-    <div class="qrcode-box">QR CODE NFC-e</div>
+    <div class="qrcode-box">
+      ${nota.qrCodeUrl ? `<img src="${gerarImagemQRCodeUrl(nota.qrCodeUrl)}" alt="QR Code NFC-e" style="width:118px;height:118px;">` : "QR CODE NFC-e"}
+    </div>
 
     <div style="font-size:11px;line-height:1.5;">
       Consulte pela chave de acesso em:<br>
-      <strong>www.nfce.fazenda.mg.gov.br/portalnfce</strong>
+      <strong>${esc(NFCE_CONFIG.urlConsulta)}</strong>
     </div>
 
     <div class="chave">
-      ${esc(nota.chave || nota.id)}
+      ${esc(nota.chaveAcesso || nota.chave || nota.id)}
     </div>
   </div>
 
@@ -1052,7 +1100,7 @@ button{
 
   <div class="rodape">
     Documento emitido por ME/EPP optante pelo Simples Nacional.<br>
-    Ambiente de homologação.<br><br>
+    ${esc(textoHomologacao())}.<br><br>
     Impresso em ${esc(nota.dataEmissaoBR)}
   </div>
 
@@ -1320,6 +1368,7 @@ app.post("/nfce/emitir", async (req, res) => {
       cNF,
       cDV: chaveAcesso.slice(-1),
       chaveAcesso,
+      qrCodeUrl: gerarUrlQRCodeNfce({ chaveAcesso }),
       dataEmissaoIso,
       dataEmissaoBR: agoraBR(),
       mesRef: dataMesRef(dataEmissaoIso),
@@ -1430,6 +1479,9 @@ app.get("/nfce/:id/xml", async (req, res) => {
 app.get("/nfce/:id/pdf", async (req, res) => {
   const nota = await lerNotaCompleta(req.params.id);
   if (!nota) return res.status(404).send("nota nao encontrada");
+  if (!nota.qrCodeUrl && (nota.chaveAcesso || nota.chave)) {
+    nota.qrCodeUrl = gerarUrlQRCodeNfce(nota);
+  }
   res.type("html").send(gerarHTML(nota));
 });
 
