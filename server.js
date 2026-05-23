@@ -5,6 +5,9 @@ import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
 import crypto from "crypto";
+import forge from "node-forge";
+import { SignedXml } from "xml-crypto";
+import { DOMParser } from "xmldom";
 
 const app = express();
 app.use(cors());
@@ -24,12 +27,81 @@ const CERT_PATH = "/etc/secrets/certificado.pfx";
 const CERT_PASSWORD = process.env.CERT_PASSWORD || "";
 
 let certificado = null;
+let certificadoFiscal = null;
 
 try {
   certificado = fs.readFileSync(CERT_PATH);
   console.log("✔ certificado carregado");
 } catch {
   console.log("⚠ certificado não encontrado");
+}
+
+function carregarCertificadoFiscal() {
+  if (certificadoFiscal) return certificadoFiscal;
+
+  if (!certificado) {
+    throw new Error("Certificado A1 não encontrado em /etc/secrets/certificado.pfx");
+  }
+
+  if (!CERT_PASSWORD) {
+    throw new Error("CERT_PASSWORD não configurada no Render");
+  }
+
+  const p12Der = forge.util.createBuffer(certificado.toString("binary"));
+  const p12Asn1 = forge.asn1.fromDer(p12Der);
+  const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, CERT_PASSWORD);
+
+  let privateKey = null;
+  let certificate = null;
+
+  const shroudedKeyBags =
+    p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[
+      forge.pki.oids.pkcs8ShroudedKeyBag
+    ] || [];
+
+  if (shroudedKeyBags.length) {
+    privateKey = shroudedKeyBags[0].key;
+  }
+
+  if (!privateKey) {
+    const keyBags =
+      p12.getBags({ bagType: forge.pki.oids.keyBag })[
+        forge.pki.oids.keyBag
+      ] || [];
+
+    if (keyBags.length) {
+      privateKey = keyBags[0].key;
+    }
+  }
+
+  const certBags =
+    p12.getBags({ bagType: forge.pki.oids.certBag })[
+      forge.pki.oids.certBag
+    ] || [];
+
+  if (certBags.length) {
+    certificate = certBags[0].cert;
+  }
+
+  if (!privateKey || !certificate) {
+    throw new Error("Não foi possível extrair chave privada/certificado do PFX");
+  }
+
+  const privateKeyPem = forge.pki.privateKeyToPem(privateKey);
+  const certificatePem = forge.pki.certificateToPem(certificate);
+  const certificateClean = certificatePem
+    .replace(/-----BEGIN CERTIFICATE-----/g, "")
+    .replace(/-----END CERTIFICATE-----/g, "")
+    .replace(/\r?\n|\r/g, "");
+
+  certificadoFiscal = {
+    privateKeyPem,
+    certificatePem,
+    certificateClean
+  };
+
+  console.log("✔ certificado fiscal preparado para assinatura XML");
+  return certificadoFiscal;
 }
 
 // ================= EMPRESA =================
@@ -321,6 +393,78 @@ function gerarImagemQRCodeUrl(conteudo) {
 function textoHomologacao() {
   return "EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL";
 }
+
+
+function obterIdInfNFe(xml) {
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  const infNFe = doc.getElementsByTagName("infNFe")[0];
+
+  if (!infNFe) {
+    throw new Error("Tag infNFe não encontrada para assinatura");
+  }
+
+  const id = infNFe.getAttribute("Id");
+  if (!id) {
+    throw new Error("Atributo Id da infNFe não encontrado");
+  }
+
+  return id;
+}
+
+function assinarXmlNFe(xml) {
+  const cert = carregarCertificadoFiscal();
+  const id = obterIdInfNFe(xml);
+
+  const sig = new SignedXml({
+    privateKey: cert.privateKeyPem,
+    publicCert: cert.certificatePem,
+    canonicalizationAlgorithm: "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+    signatureAlgorithm: "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
+  });
+
+  sig.addReference({
+    xpath: "//*[local-name(.)='infNFe']",
+    uri: "#" + id,
+    transforms: [
+      "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+      "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+    ],
+    digestAlgorithm: "http://www.w3.org/2000/09/xmldsig#sha1"
+  });
+
+  sig.keyInfoProvider = {
+    getKeyInfo() {
+      return `<X509Data><X509Certificate>${cert.certificateClean}</X509Certificate></X509Data>`;
+    }
+  };
+
+  sig.computeSignature(xml, {
+    location: {
+      reference: "//*[local-name(.)='infNFe']",
+      action: "after"
+    }
+  });
+
+  return sig.getSignedXml();
+}
+
+function tentarAssinarXmlNFe(xml) {
+  try {
+    return {
+      xml: assinarXmlNFe(xml),
+      assinado: true,
+      erro: null
+    };
+  } catch (e) {
+    console.error("⚠ falha ao assinar XML:", e.message);
+    return {
+      xml,
+      assinado: false,
+      erro: e.message
+    };
+  }
+}
+
 
 function normalizarMes(ano, mes) {
   const a = Number(ano);
@@ -1315,7 +1459,8 @@ app.get("/health", async (req, res) => {
     serie_remota: remoto?.serie ?? null,
     apps_script_configurado: !!API_BELA_SHEETS,
     certificado: certificado ? true : false,
-    cert_password_configurada: !!CERT_PASSWORD
+    cert_password_configurada: !!CERT_PASSWORD,
+    assinatura_xml_disponivel: certificado && CERT_PASSWORD ? true : false
   });
 });
 
@@ -1324,6 +1469,26 @@ app.get("/certificado/status", (req, res) => {
     ok: certificado ? true : false,
     mensagem: certificado ? "certificado carregado" : "certificado nao encontrado"
   });
+});
+
+app.get("/assinatura/status", (req, res) => {
+  try {
+    carregarCertificadoFiscal();
+    res.json({
+      ok: true,
+      certificado: true,
+      senha_configurada: !!CERT_PASSWORD,
+      assinatura_disponivel: true
+    });
+  } catch (e) {
+    res.status(400).json({
+      ok: false,
+      certificado: !!certificado,
+      senha_configurada: !!CERT_PASSWORD,
+      assinatura_disponivel: false,
+      error: e.message
+    });
+  }
 });
 
 app.get("/empresa", (req, res) => {
@@ -1380,9 +1545,14 @@ app.post("/nfce/emitir", async (req, res) => {
     nota.pdf_url = `${BASE_URL}/nfce/${encodeURIComponent(id)}/pdf`;
     nota.xml_url = `${BASE_URL}/nfce/${encodeURIComponent(id)}/xml`;
 
-    await salvarNota(nota);
+    const xmlOriginal = gerarXML(nota);
+    const assinatura = tentarAssinarXmlNFe(xmlOriginal);
+    const xml = assinatura.xml;
 
-    const xml = gerarXML(nota);
+    nota.xml_assinado = assinatura.assinado;
+    nota.erro_assinatura = assinatura.erro;
+
+    await salvarNota(nota);
 
     let xmlSalvoNoAppsScript = false;
     let erroAppsScript = null;
@@ -1409,6 +1579,8 @@ app.post("/nfce/emitir", async (req, res) => {
         xml_url: nota.xml_url,
         numeracao_origem: numeracaoOrigem,
         xml_salvo_apps_script: xmlSalvoNoAppsScript,
+        xml_assinado: assinatura.assinado,
+        erro_assinatura: assinatura.erro,
         erro_apps_script: erroAppsScript
       }
     });
@@ -1473,7 +1645,9 @@ app.get("/nfce/:id", async (req, res) => {
 app.get("/nfce/:id/xml", async (req, res) => {
   const nota = await lerNotaCompleta(req.params.id);
   if (!nota) return res.status(404).type("text/xml").send("<erro>Nota não encontrada</erro>");
-  res.type("text/xml").send(gerarXML(nota));
+  const xmlOriginal = gerarXML(nota);
+  const assinatura = tentarAssinarXmlNFe(xmlOriginal);
+  res.type("text/xml").send(assinatura.xml);
 });
 
 app.get("/nfce/:id/pdf", async (req, res) => {
