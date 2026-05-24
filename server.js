@@ -47,61 +47,78 @@ function carregarCertificadoFiscal() {
     throw new Error("CERT_PASSWORD não configurada no Render");
   }
 
-  const p12Der = forge.util.createBuffer(certificado.toString("binary"));
-  const p12Asn1 = forge.asn1.fromDer(p12Der);
-  const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, CERT_PASSWORD);
+  try {
+    // =========================
+    // LEITURA CORRIGIDA DO PFX
+    // =========================
+    const pfxBuffer = Buffer.from(certificado);
 
-  let privateKey = null;
-  let certificate = null;
+    const p12Asn1 = forge.asn1.fromDer(
+      forge.util.createBuffer(pfxBuffer.toString("binary"))
+    );
 
-  const shroudedKeyBags =
-    p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[
-      forge.pki.oids.pkcs8ShroudedKeyBag
-    ] || [];
+    const p12 = forge.pkcs12.pkcs12FromAsn1(
+      p12Asn1,
+      CERT_PASSWORD
+    );
 
-  if (shroudedKeyBags.length) {
-    privateKey = shroudedKeyBags[0].key;
-  }
+    let privateKey = null;
+    let certificate = null;
 
-  if (!privateKey) {
-    const keyBags =
-      p12.getBags({ bagType: forge.pki.oids.keyBag })[
-        forge.pki.oids.keyBag
-      ] || [];
+    const shroudedKeyBags =
+      p12.getBags({
+        bagType: forge.pki.oids.pkcs8ShroudedKeyBag
+      })[forge.pki.oids.pkcs8ShroudedKeyBag] || [];
 
-    if (keyBags.length) {
-      privateKey = keyBags[0].key;
+    if (shroudedKeyBags.length) {
+      privateKey = shroudedKeyBags[0].key;
     }
+
+    if (!privateKey) {
+      const keyBags =
+        p12.getBags({
+          bagType: forge.pki.oids.keyBag
+        })[forge.pki.oids.keyBag] || [];
+
+      if (keyBags.length) {
+        privateKey = keyBags[0].key;
+      }
+    }
+
+    const certBags =
+      p12.getBags({
+        bagType: forge.pki.oids.certBag
+      })[forge.pki.oids.certBag] || [];
+
+    if (certBags.length) {
+      certificate = certBags[0].cert;
+    }
+
+    if (!privateKey || !certificate) {
+      throw new Error("Falha ao extrair chave privada/certificado do PFX");
+    }
+
+    const privateKeyPem = forge.pki.privateKeyToPem(privateKey);
+    const certificatePem = forge.pki.certificateToPem(certificate);
+
+    const certificateClean = certificatePem
+      .replace(/-----BEGIN CERTIFICATE-----/g, "")
+      .replace(/-----END CERTIFICATE-----/g, "")
+      .replace(/\r?\n|\r/g, "");
+
+    certificadoFiscal = {
+      privateKeyPem,
+      certificatePem,
+      certificateClean
+    };
+
+    console.log("✔ certificado fiscal preparado");
+    return certificadoFiscal;
+
+  } catch (err) {
+    console.error("ERRO CERTIFICADO:", err);
+    throw err;
   }
-
-  const certBags =
-    p12.getBags({ bagType: forge.pki.oids.certBag })[
-      forge.pki.oids.certBag
-    ] || [];
-
-  if (certBags.length) {
-    certificate = certBags[0].cert;
-  }
-
-  if (!privateKey || !certificate) {
-    throw new Error("Não foi possível extrair chave privada/certificado do PFX");
-  }
-
-  const privateKeyPem = forge.pki.privateKeyToPem(privateKey);
-  const certificatePem = forge.pki.certificateToPem(certificate);
-  const certificateClean = certificatePem
-    .replace(/-----BEGIN CERTIFICATE-----/g, "")
-    .replace(/-----END CERTIFICATE-----/g, "")
-    .replace(/\r?\n|\r/g, "");
-
-  certificadoFiscal = {
-    privateKeyPem,
-    certificatePem,
-    certificateClean
-  };
-
-  console.log("✔ certificado fiscal preparado para assinatura XML");
-  return certificadoFiscal;
 }
 
 // ================= EMPRESA =================
