@@ -24,13 +24,47 @@ const NOTAS_DIR = path.join(DATA_DIR, "notas");
 // ================= CERTIFICADO =================
 
 const CERT_PATH = "/etc/secrets/certificado.pfx";
-const CERT_PASSWORD = process.env.CERT_PASSWORD || "";
+const CERT_PASSWORD = process.env.CERT_PASSWORD || process.env.CERTIFICADO_SENHA || "";
+const CERTIFICADO_BASE64 = process.env.CERTIFICADO_BASE64 || "";
 
 let certificado = null;
 let certificadoFiscal = null;
 
+function limparBase64Certificado(valor) {
+  return String(valor || "")
+    .replace(/-----BEGIN PKCS12-----/g, "")
+    .replace(/-----END PKCS12-----/g, "")
+    .replace(/-----BEGIN CERTIFICATE-----/g, "")
+    .replace(/-----END CERTIFICATE-----/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function pareceBase64Texto(buffer) {
+  const texto = buffer.toString("utf8").trim();
+  if (!texto) return false;
+  if (texto.includes("-----BEGIN")) return true;
+  return /^[A-Za-z0-9+/=\r\n\s]+$/.test(texto) && texto.length > 100;
+}
+
+function carregarBufferCertificado() {
+  if (CERTIFICADO_BASE64) {
+    const limpo = limparBase64Certificado(CERTIFICADO_BASE64);
+    return Buffer.from(limpo, "base64");
+  }
+
+  const arquivo = fs.readFileSync(CERT_PATH);
+
+  if (pareceBase64Texto(arquivo)) {
+    const limpo = limparBase64Certificado(arquivo.toString("utf8"));
+    return Buffer.from(limpo, "base64");
+  }
+
+  return arquivo;
+}
+
 try {
-  certificado = fs.readFileSync(CERT_PATH);
+  certificado = carregarBufferCertificado();
   console.log("✔ certificado carregado");
 } catch {
   console.log("⚠ certificado não encontrado");
@@ -40,27 +74,27 @@ function carregarCertificadoFiscal() {
   if (certificadoFiscal) return certificadoFiscal;
 
   if (!certificado) {
-    throw new Error("Certificado A1 não encontrado em /etc/secrets/certificado.pfx");
+    throw new Error("Certificado A1 não encontrado. Configure /etc/secrets/certificado.pfx ou CERTIFICADO_BASE64.");
   }
 
   if (!CERT_PASSWORD) {
-    throw new Error("CERT_PASSWORD não configurada no Render");
+    throw new Error("Senha do certificado não configurada. Use CERT_PASSWORD ou CERTIFICADO_SENHA.");
   }
 
   try {
-    // =========================
-    // LEITURA CORRIGIDA DO PFX
-    // =========================
     const pfxBuffer = Buffer.from(certificado);
+    const derBuffer = forge.util.createBuffer(pfxBuffer.toString("binary"));
 
-    const p12Asn1 = forge.asn1.fromDer(
-      forge.util.createBuffer(pfxBuffer.toString("binary"))
-    );
+    // strict=false evita o erro "Unparsed DER bytes remain after ASN.1 parsing"
+    // em alguns PFX exportados no Windows/certificadoras brasileiras.
+    const p12Asn1 = forge.asn1.fromDer(derBuffer, false);
 
-    const p12 = forge.pkcs12.pkcs12FromAsn1(
-      p12Asn1,
-      CERT_PASSWORD
-    );
+    let p12;
+    try {
+      p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, CERT_PASSWORD);
+    } catch {
+      p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, CERT_PASSWORD);
+    }
 
     let privateKey = null;
     let certificate = null;
@@ -95,7 +129,7 @@ function carregarCertificadoFiscal() {
     }
 
     if (!privateKey || !certificate) {
-      throw new Error("Falha ao extrair chave privada/certificado do PFX");
+      throw new Error("Falha ao extrair chave privada/certificado do PFX. Verifique se o certificado é A1 e se a senha está correta.");
     }
 
     const privateKeyPem = forge.pki.privateKeyToPem(privateKey);
@@ -1506,6 +1540,17 @@ app.get("/assinatura/status", (req, res) => {
       error: e.message
     });
   }
+});
+
+app.get("/assinatura/debug", (req, res) => {
+  res.json({
+    ok: true,
+    certificado_carregado: !!certificado,
+    tamanho_certificado_bytes: certificado ? certificado.length : 0,
+    senha_configurada: !!CERT_PASSWORD,
+    usando_certificado_base64_env: !!CERTIFICADO_BASE64,
+    tem_arquivo_certificado: fs.existsSync(CERT_PATH)
+  });
 });
 
 app.get("/empresa", (req, res) => {
