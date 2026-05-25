@@ -624,32 +624,55 @@ function resolverNcmFiscal(item = {}) {
     ""
   ).trim().toLowerCase();
 
+  const automatico = ncmPorCategoriaOuDescricao(item);
+  const automaticoValido = ncmValidoFiscal(automatico);
+
+  // Regra principal:
+  // 1) Se veio de XML de entrada com NCM válido, PRESERVA sempre.
+  // 2) Se foi marcado como manual com NCM válido, PRESERVA sempre.
+  // 3) Se é automático, vazio, inválido ou produto antigo sem origem, pode corrigir.
+  // Isso resolve produtos antigos com NCM errado, como "meias" com NCM de vestido.
   if (
     ncmValidoFiscal(ncmAtual) &&
-    (
-      origemNcm === "xml_entrada" ||
-      origemNcm === "xml" ||
-      origemNcm === "manual" ||
-      origemNcm === ""
-    )
+    (origemNcm === "xml_entrada" || origemNcm === "xml")
   ) {
+    return {
+      ncm: ncmAtual,
+      ncm_origem: "xml_entrada"
+    };
+  }
+
+  if (
+    ncmValidoFiscal(ncmAtual) &&
+    origemNcm === "manual"
+  ) {
+    return {
+      ncm: ncmAtual,
+      ncm_origem: "manual"
+    };
+  }
+
+  // Produto antigo sem origem marcada:
+  // se a descrição/categoria indicar um NCM fiscal claro e diferente, atualiza.
+  if (automaticoValido) {
+    if (!ncmValidoFiscal(ncmAtual) || origemNcm === "automatico" || origemNcm === "" || origemNcm === "preservado") {
+      return {
+        ncm: automatico,
+        ncm_origem: "automatico"
+      };
+    }
+  }
+
+  // Se não conseguiu resolver automaticamente, mantém o que existe se for válido.
+  if (ncmValidoFiscal(ncmAtual)) {
     return {
       ncm: ncmAtual,
       ncm_origem: origemNcm || "preservado"
     };
   }
 
-  const automatico = ncmPorCategoriaOuDescricao(item);
-
-  if (ncmValidoFiscal(automatico)) {
-    return {
-      ncm: automatico,
-      ncm_origem: "automatico"
-    };
-  }
-
   return {
-    ncm: ncmAtual || "00000000",
+    ncm: "00000000",
     ncm_origem: "pendente"
   };
 }
