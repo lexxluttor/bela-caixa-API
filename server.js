@@ -526,6 +526,225 @@ function normalizarMes(ano, mes) {
   return `${a}-${pad2(m)}`;
 }
 
+
+// ================= SANEAMENTO FISCAL AUTOMÁTICO =================
+//
+// Regra importante:
+// - NCM válido vindo de XML de entrada ou cadastro manual é PRESERVADO.
+// - Se não houver origem marcada, NCM válido também é preservado.
+// - O sistema só preenche automaticamente se estiver vazio, inválido, 00000000,
+//   ou se a origem fiscal estiver marcada como "automatico".
+
+function ncmValidoFiscal(ncm) {
+  const limpo = String(ncm || "").replace(/\D+/g, "");
+  return limpo.length === 8 && limpo !== "00000000";
+}
+
+function normalizarTextoFiscal(v) {
+  return String(v || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function obterTextoProdutoFiscal(item = {}) {
+  return normalizarTextoFiscal([
+    item.descricao,
+    item.nome,
+    item.desc,
+    item.cat,
+    item.categoria,
+    item.grupo,
+    item.subcat,
+    item.subcategoria,
+    item.tipo,
+    item.departamento
+  ].join(" "));
+}
+
+function ncmPorCategoriaOuDescricao(item = {}) {
+  const texto = obterTextoProdutoFiscal(item);
+
+  // Calçados
+  if (texto.includes("sandalia infantil") || texto.includes("sandalia")) return "64022000";
+  if (texto.includes("chinelo infantil") || texto.includes("chinelo")) return "64022000";
+  if (texto.includes("tenis infantil") || texto.includes("tenis masculino") || texto.includes("tenis feminino") || texto.includes("tenis")) return "64041100";
+  if (texto.includes("sapatilha")) return "64029990";
+  if (texto.includes("sapato")) return "64039990";
+  if (texto.includes("bota")) return "64039990";
+  if (texto.includes("calcado") || texto.includes("calcados")) return "64029990";
+
+  // Bolsas e acessórios
+  if (texto.includes("mochila")) return "42029200";
+  if (texto.includes("bolsa")) return "42029200";
+  if (texto.includes("carteira")) return "42023200";
+  if (texto.includes("cinto")) return "42033000";
+  if (texto.includes("bone")) return "65050090";
+
+  // Peças íntimas e meias
+  if (texto.includes("cueca")) return "61071100";
+  if (texto.includes("calcinha")) return "61082200";
+  if (texto.includes("sutia") || texto.includes("top")) return "62121000";
+  if (texto.includes("meia")) return "61159600";
+
+  // Moletom
+  if (texto.includes("conjunto") && texto.includes("moletom")) return "61102000";
+  if (texto.includes("blusa") && texto.includes("moletom")) return "61102000";
+  if ((texto.includes("calca") || texto.includes("calça")) && texto.includes("moletom")) return "61046200";
+  if (texto.includes("moletom")) return "61102000";
+
+  // Conjuntos
+  if (texto.includes("conjunto") && texto.includes("masculino")) return "61032300";
+  if (texto.includes("conjunto") && texto.includes("feminino")) return "61042300";
+  if (texto.includes("conjunto") && texto.includes("infantil")) return "61042300";
+  if (texto.includes("conjunto")) return "61042300";
+
+  // Roupas principais
+  if (texto.includes("vestido")) return "62044300";
+  if (texto.includes("jaqueta")) return "62029300";
+  if (texto.includes("camiseta") || texto.includes("camisa") || texto.includes("blusa") || texto.includes("regata")) return "61091000";
+  if (texto.includes("jeans") && (texto.includes("masculino") || texto.includes("homem"))) return "62034200";
+  if (texto.includes("jeans")) return "62046200";
+  if (texto.includes("calca") || texto.includes("calça")) return "62046200";
+  if (texto.includes("bermuda") || texto.includes("short")) return "62046200";
+  if (texto.includes("saia")) return "62045300";
+  if (texto.includes("pijama")) return "61083100";
+
+  return "00000000";
+}
+
+function resolverNcmFiscal(item = {}) {
+  const ncmAtual = String(item.ncm || item.NCM || "").replace(/\D+/g, "");
+  const origemNcm = String(
+    item.ncm_origem ||
+    item.origem_ncm ||
+    item.origemFiscal ||
+    item.origem_fiscal ||
+    ""
+  ).trim().toLowerCase();
+
+  if (
+    ncmValidoFiscal(ncmAtual) &&
+    (
+      origemNcm === "xml_entrada" ||
+      origemNcm === "xml" ||
+      origemNcm === "manual" ||
+      origemNcm === ""
+    )
+  ) {
+    return {
+      ncm: ncmAtual,
+      ncm_origem: origemNcm || "preservado"
+    };
+  }
+
+  const automatico = ncmPorCategoriaOuDescricao(item);
+
+  if (ncmValidoFiscal(automatico)) {
+    return {
+      ncm: automatico,
+      ncm_origem: "automatico"
+    };
+  }
+
+  return {
+    ncm: ncmAtual || "00000000",
+    ncm_origem: "pendente"
+  };
+}
+
+function resolverCampoFiscalPadrao(valor, padrao) {
+  const s = String(valor ?? "").trim();
+  return s || padrao;
+}
+
+function numeroFiscalPadrao(valor, padrao = 0) {
+  const n = Number(String(valor ?? "").replace(",", "."));
+  return Number.isFinite(n) ? n : padrao;
+}
+
+function cstPisCofinsPadrao(valor) {
+  const s = String(valor ?? "").replace(/\D+/g, "");
+  return s || "49";
+}
+
+function csosnPadrao(valor) {
+  const s = String(valor ?? "").replace(/\D+/g, "");
+  return s || "102";
+}
+
+function cfopPadrao(valor) {
+  const s = String(valor ?? "").replace(/\D+/g, "");
+  return s || "5102";
+}
+
+function origemMercadoriaPadrao(valor) {
+  const s = String(valor ?? "").replace(/\D+/g, "");
+  return s !== "" ? s : "0";
+}
+
+function unidadeFiscalPadrao(valor) {
+  const s = String(valor ?? "").trim().toUpperCase();
+  return s || "UN";
+}
+
+function indTotPadrao(valor) {
+  const s = String(valor ?? "").replace(/\D+/g, "");
+  return s === "0" ? "0" : "1";
+}
+
+function resolverFiscalProdutoCompleto(item = {}) {
+  const ncmResolvido = resolverNcmFiscal(item);
+
+  const qtd = numeroFiscalPadrao(item.qtd ?? item.quantidade ?? item.qty, 1);
+  const valorUnitario = numeroFiscalPadrao(item.valorUnitario ?? item.preco ?? item.valor, 0);
+  const valorTotal = numeroFiscalPadrao(item.valorTotal, qtd * valorUnitario);
+
+  const unidade = unidadeFiscalPadrao(item.unidade);
+  const unidadeTrib = unidadeFiscalPadrao(item.unidadeTrib || item.unidade_trib || item.unidade);
+
+  const ean = tagEAN(item.ean || item.codigo_barras || item.codBarras || item.codigoDeBarras || "");
+  const eanTrib = tagEAN(item.eanTrib || item.ean_trib || item.ean || item.codigo_barras || item.codBarras || item.codigoDeBarras || "");
+
+  return {
+    codigo: String(item.cod || item.codigo || item.ref || item.id || "PRODUTO"),
+    ean,
+    eanTrib,
+    descricao: String(item.descricao || item.nome || item.desc || "PRODUTO"),
+    ncm: ncmResolvido.ncm,
+    ncm_origem: ncmResolvido.ncm_origem,
+
+    cfop: cfopPadrao(item.cfop),
+    csosn: csosnPadrao(item.csosn),
+    origem: origemMercadoriaPadrao(item.origem),
+
+    cest: String(item.cest || ""),
+    unidade,
+    unidadeTrib,
+    quantidade: qtd,
+    quantidadeTrib: numeroFiscalPadrao(item.quantidadeTrib ?? item.quantidade_trib, qtd),
+    valorUnitario,
+    valorUnitarioTrib: numeroFiscalPadrao(item.valorUnitarioTrib ?? item.valor_unitario_trib, valorUnitario),
+    valorTotal,
+    indTot: indTotPadrao(item.indTot),
+
+    cst_pis: cstPisCofinsPadrao(item.cst_pis || item.cstPis),
+    aliq_pis: numeroFiscalPadrao(item.aliq_pis ?? item.aliqPis, 0),
+    base_pis: numeroFiscalPadrao(item.base_pis ?? item.vBCPIS ?? item.vbc_pis, 0),
+    valorPIS: numeroFiscalPadrao(item.valorPIS ?? item.vPIS, 0),
+
+    cst_cofins: cstPisCofinsPadrao(item.cst_cofins || item.cstCofins),
+    aliq_cofins: numeroFiscalPadrao(item.aliq_cofins ?? item.aliqCofins, 0),
+    base_cofins: numeroFiscalPadrao(item.base_cofins ?? item.vBCCOFINS ?? item.vbc_cofins, 0),
+    valorCOFINS: numeroFiscalPadrao(item.valorCOFINS ?? item.vCOFINS, 0),
+
+    vTotTrib: numeroFiscalPadrao(item.vTotTrib ?? item.valorTributos, 0),
+    saneamento_fiscal: true
+  };
+}
+
+
 // ================= FORMA DE PAGAMENTO FISCAL =================
 
 function mapearFormaPagamentoFiscal(tipo = "") {
@@ -675,36 +894,7 @@ async function carregarSequencial() {
 // ================= NORMALIZAR VENDA =================
 
 function obterProdutoFiscal(item = {}) {
-  const qtd = Number(item.qtd ?? item.quantidade ?? item.qty ?? 1);
-  const valorUnitario = Number(item.valorUnitario ?? item.preco ?? item.valor ?? 0);
-  const valorTotal = Number(item.valorTotal ?? (qtd * valorUnitario));
-
-  return {
-    codigo: String(item.cod || item.codigo || item.ref || item.id || ""),
-    ean: tagEAN(item.ean || item.codigo_barras || item.codBarras || item.codigoDeBarras || ""),
-    eanTrib: tagEAN(item.eanTrib || item.ean_trib || item.ean || item.codigo_barras || item.codBarras || item.codigoDeBarras || ""),
-    descricao: String(item.descricao || item.nome || item.desc || "PRODUTO"),
-    ncm: String(item.ncm || "00000000"),
-    cfop: String(item.cfop || "5102"),
-    csosn: String(item.csosn || "102"),
-    cest: String(item.cest || ""),
-    cst_pis: String(item.cst_pis || item.cstPis || "49"),
-    aliq_pis: toNumber(item.aliq_pis ?? item.aliqPis, 0),
-    cst_cofins: String(item.cst_cofins || item.cstCofins || "49"),
-    aliq_cofins: toNumber(item.aliq_cofins ?? item.aliqCofins, 0),
-    unidade: String(item.unidade || "UN"),
-    unidadeTrib: String(item.unidadeTrib || item.unidade_trib || item.unidade || "UN"),
-    quantidadeTrib: Number(item.quantidadeTrib ?? item.quantidade_trib ?? qtd),
-    valorUnitarioTrib: Number(item.valorUnitarioTrib ?? item.valor_unitario_trib ?? valorUnitario),
-    indTot: String(item.indTot || "1"),
-    vTotTrib: toNumber(item.vTotTrib ?? item.valorTributos, 0),
-    valorPIS: 0,
-    valorCOFINS: 0,
-    origem: String(item.origem || "0"),
-    quantidade: qtd,
-    valorUnitario,
-    valorTotal
-  };
+  return resolverFiscalProdutoCompleto(item);
 }
 
 function normalizarPayload(body = {}) {
@@ -790,17 +980,17 @@ function gerarXML(nota) {
         <PIS>
           <PISOutr>
             <CST>${cstPis}</CST>
-            <vBC>0.00</vBC>
+            <vBC>${dinheiro(item.base_pis || 0)}</vBC>
             <pPIS>${aliqPis}</pPIS>
-            <vPIS>0.00</vPIS>
+            <vPIS>${dinheiro(item.valorPIS || 0)}</vPIS>
           </PISOutr>
         </PIS>
         <COFINS>
           <COFINSOutr>
             <CST>${cstCofins}</CST>
-            <vBC>0.00</vBC>
+            <vBC>${dinheiro(item.base_cofins || 0)}</vBC>
             <pCOFINS>${aliqCofins}</pCOFINS>
-            <vCOFINS>0.00</vCOFINS>
+            <vCOFINS>${dinheiro(item.valorCOFINS || 0)}</vCOFINS>
           </COFINSOutr>
         </COFINS>
       </imposto>
