@@ -5,6 +5,7 @@ import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
 import crypto from "crypto";
+import https from "https";
 import forge from "node-forge";
 import { SignedXml } from "xml-crypto";
 import { DOMParser } from "xmldom";
@@ -194,6 +195,21 @@ const NFCE_CONFIG = {
  // CSC_ID=000001
  // CSC_TOKEN=token_csc_fornecido_pela_sefaz_mg
  // Em homologação, sem CSC configurado, a API gera QR Code técnico de teste.
+const SEFAZ_CONFIG = {
+  habilitada: String(process.env.SEFAZ_HABILITADA || "false").toLowerCase() === "true",
+  uf: process.env.SEFAZ_UF || "MG",
+  ambiente: process.env.SEFAZ_AMBIENTE || NFCE_CONFIG.tpAmb || "2",
+  versao: "4.00",
+  idLotePrefixo: process.env.SEFAZ_ID_LOTE_PREFIXO || "1",
+  autorizacaoUrl: process.env.SEFAZ_NFCE_AUTORIZACAO_URL || "",
+  timeoutMs: Number(process.env.SEFAZ_TIMEOUT_MS || 30000)
+};
+
+// Enquanto SEFAZ_HABILITADA=false, o servidor NÃO transmite nota.
+// Quando você liberar NFC-e na SEFAZ/MG, configuramos:
+// SEFAZ_HABILITADA=true
+// SEFAZ_NFCE_AUTORIZACAO_URL=endpoint homologação/produção correto
+
 const CSC_CONFIG = {
   id: process.env.CSC_ID || "",
   token: process.env.CSC_TOKEN || ""
@@ -1687,6 +1703,204 @@ async function responderZipPeriodo(res, inicio, fim) {
   return res.send(zipBuffer);
 }
 
+
+// ================= SEFAZ / AUTORIZAÇÃO NFC-E =================
+//
+// Camada preparada para transmissão SEFAZ.
+// Segurança: enquanto SEFAZ_HABILITADA=false, não envia nada.
+
+function gerarIdLoteNfce(nota = {}) {
+  const numero = String(nota.numero || Date.now()).replace(/\D+/g, "");
+  const base = String(SEFAZ_CONFIG.idLotePrefixo || "1") + numero;
+  return base.slice(-15).padStart(15, "0");
+}
+
+function montarEnvelopeSoapNfeAutorizacao(xmlAssinado, idLote) {
+  const xmlLimpo = String(xmlAssinado || "")
+    .replace(/<\?xml[^>]*\?>/i, "")
+    .trim();
+
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4">
+      <enviNFe xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
+        <idLote>${esc(idLote)}</idLote>
+        <indSinc>1</indSinc>
+        ${xmlLimpo}
+      </enviNFe>
+    </nfeDadosMsg>
+  </soap12:Body>
+</soap12:Envelope>`;
+}
+
+function httpsPostComCertificado(url, body, headers = {}) {
+  return new Promise(function(resolve, reject) {
+    if (!certificado) {
+      return reject(new Error("Certificado não carregado para conexão SEFAZ."));
+    }
+
+    const parsed = new URL(url);
+
+    const options = {
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || 443,
+      path: parsed.pathname + parsed.search,
+      method: "POST",
+      pfx: certificado,
+      passphrase: CERT_PASSWORD,
+      rejectUnauthorized: true,
+      timeout: SEFAZ_CONFIG.timeoutMs,
+      headers: Object.assign({
+        "Content-Type": "application/soap+xml; charset=utf-8",
+        "Content-Length": Buffer.byteLength(body, "utf8")
+      }, headers)
+    };
+
+    const req = https.request(options, function(res) {
+      let chunks = "";
+      res.setEncoding("utf8");
+
+      res.on("data", function(chunk) {
+        chunks += chunk;
+      });
+
+      res.on("end", function() {
+        resolve({
+          statusCode: res.statusCode,
+          headers: res.headers,
+          body: chunks
+        });
+      });
+    });
+
+    req.on("timeout", function() {
+      req.destroy(new Error("Timeout ao conectar na SEFAZ."));
+    });
+
+    req.on("error", reject);
+    req.write(body, "utf8");
+    req.end();
+  });
+}
+
+function extrairTagXml(texto, tag) {
+  const re = new RegExp("<(?:\\w+:)?" + tag + "[^>]*>([\\s\\S]*?)</(?:\\w+:)?" + tag + ">", "i");
+  const m = String(texto || "").match(re);
+  return m ? m[1].trim() : "";
+}
+
+function extrairRetornoSefaz(xmlRetorno) {
+  const cStat = extrairTagXml(xmlRetorno, "cStat");
+  const xMotivo = extrairTagXml(xmlRetorno, "xMotivo");
+  const nRec = extrairTagXml(xmlRetorno, "nRec");
+  const nProt = extrairTagXml(xmlRetorno, "nProt");
+  const chNFe = extrairTagXml(xmlRetorno, "chNFe");
+  const dhRecbto = extrairTagXml(xmlRetorno, "dhRecbto");
+
+  return {
+    cStat,
+    xMotivo,
+    nRec,
+    nProt,
+    chNFe,
+    dhRecbto,
+    autorizado: cStat === "100",
+    recebido: cStat === "103" || cStat === "104" || !!nRec
+  };
+}
+
+function montarNfeProc(xmlAssinado, xmlRetorno) {
+  const protMatch = String(xmlRetorno || "").match(/<protNFe[\s\S]*?<\/protNFe>/i);
+  if (!protMatch) return "";
+
+  const nfeSemDecl = String(xmlAssinado || "").replace(/<\?xml[^>]*\?>/i, "").trim();
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
+${nfeSemDecl}
+${protMatch[0]}
+</nfeProc>`;
+}
+
+async function transmitirNfceSefaz(nota, xmlAssinado) {
+  if (!SEFAZ_CONFIG.habilitada) {
+    return {
+      ok: false,
+      transmitido: false,
+      pendente_habilitacao: true,
+      cStat: "",
+      xMotivo: "SEFAZ ainda não habilitada no sistema. Configure SEFAZ_HABILITADA=true somente após liberar NFC-e na SEFAZ.",
+      xmlRetorno: "",
+      nfeProc: ""
+    };
+  }
+
+  if (!SEFAZ_CONFIG.autorizacaoUrl) {
+    return {
+      ok: false,
+      transmitido: false,
+      pendente_configuracao: true,
+      cStat: "",
+      xMotivo: "SEFAZ_NFCE_AUTORIZACAO_URL não configurada no Render.",
+      xmlRetorno: "",
+      nfeProc: ""
+    };
+  }
+
+  carregarCertificadoFiscal();
+
+  const idLote = gerarIdLoteNfce(nota);
+  const envelope = montarEnvelopeSoapNfeAutorizacao(xmlAssinado, idLote);
+
+  const resposta = await httpsPostComCertificado(SEFAZ_CONFIG.autorizacaoUrl, envelope, {
+    "SOAPAction": ""
+  });
+
+  const retorno = extrairRetornoSefaz(resposta.body);
+  const nfeProc = retorno.autorizado ? montarNfeProc(xmlAssinado, resposta.body) : "";
+
+  return {
+    ok: resposta.statusCode >= 200 && resposta.statusCode < 300,
+    transmitido: true,
+    idLote,
+    httpStatus: resposta.statusCode,
+    ...retorno,
+    xmlRetorno: resposta.body,
+    nfeProc
+  };
+}
+
+async function salvarRetornoSefazLocal(nota, retornoSefaz) {
+  const atual = await lerNotaLocal(nota.id) || nota;
+
+  atual.sefaz = {
+    transmitido: !!retornoSefaz.transmitido,
+    autorizado: !!retornoSefaz.autorizado,
+    cStat: retornoSefaz.cStat || "",
+    xMotivo: retornoSefaz.xMotivo || "",
+    nRec: retornoSefaz.nRec || "",
+    nProt: retornoSefaz.nProt || "",
+    chNFe: retornoSefaz.chNFe || "",
+    dhRecbto: retornoSefaz.dhRecbto || "",
+    httpStatus: retornoSefaz.httpStatus || "",
+    atualizadoEm: new Date().toISOString()
+  };
+
+  if (retornoSefaz.autorizado) {
+    atual.status = "autorizada";
+    atual.protocolo = retornoSefaz.nProt || "";
+    atual.xml_autorizado = retornoSefaz.nfeProc || "";
+  } else if (retornoSefaz.transmitido) {
+    atual.status = "rejeitada_ou_pendente";
+  }
+
+  await salvarNota(atual);
+  return atual;
+}
+
+
 // ================= ROTAS =================
 
 app.get("/", (req, res) => {
@@ -1765,6 +1979,67 @@ app.get("/assinatura/debug", (req, res) => {
     tem_arquivo_certificado: fs.existsSync(CERT_PATH)
   });
 });
+
+
+app.get("/sefaz/status", (req, res) => {
+  res.json({
+    ok: true,
+    uf: SEFAZ_CONFIG.uf,
+    ambiente: SEFAZ_CONFIG.ambiente,
+    habilitada: SEFAZ_CONFIG.habilitada,
+    autorizacao_url_configurada: !!SEFAZ_CONFIG.autorizacaoUrl,
+    certificado_carregado: !!certificado,
+    senha_configurada: !!CERT_PASSWORD,
+    pronto_para_transmitir: !!(SEFAZ_CONFIG.habilitada && SEFAZ_CONFIG.autorizacaoUrl && certificado && CERT_PASSWORD),
+    aviso: SEFAZ_CONFIG.habilitada
+      ? "SEFAZ habilitada para tentativa de transmissão."
+      : "SEFAZ ainda bloqueada por segurança. Configure SEFAZ_HABILITADA=true apenas quando liberar NFC-e na SEFAZ."
+  });
+});
+
+app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
+  try {
+    const nota = await lerNotaCompleta(req.params.id);
+    if (!nota) {
+      return res.status(404).json({ ok: false, error: "Nota não encontrada." });
+    }
+
+    const xmlOriginal = gerarXML(nota);
+    const assinatura = tentarAssinarXmlNFe(xmlOriginal);
+
+    if (!assinatura.assinado) {
+      return res.status(400).json({
+        ok: false,
+        error: "XML não foi assinado. Não é seguro enviar para a SEFAZ.",
+        erro_assinatura: assinatura.erro
+      });
+    }
+
+    const retornoSefaz = await transmitirNfceSefaz(nota, assinatura.xml);
+    await salvarRetornoSefazLocal(nota, retornoSefaz);
+
+    res.json({
+      ok: retornoSefaz.ok,
+      transmitido: retornoSefaz.transmitido,
+      autorizado: retornoSefaz.autorizado,
+      pendente_habilitacao: !!retornoSefaz.pendente_habilitacao,
+      pendente_configuracao: !!retornoSefaz.pendente_configuracao,
+      cStat: retornoSefaz.cStat,
+      xMotivo: retornoSefaz.xMotivo,
+      nRec: retornoSefaz.nRec,
+      nProt: retornoSefaz.nProt,
+      chNFe: retornoSefaz.chNFe,
+      dhRecbto: retornoSefaz.dhRecbto,
+      httpStatus: retornoSefaz.httpStatus || null
+    });
+  } catch (e) {
+    res.status(400).json({
+      ok: false,
+      error: e.message || "Erro ao enviar NFC-e para SEFAZ."
+    });
+  }
+});
+
 
 app.get("/empresa", (req, res) => {
   res.json(EMPRESA);
@@ -1856,7 +2131,10 @@ app.post("/nfce/emitir", async (req, res) => {
         xml_salvo_apps_script: xmlSalvoNoAppsScript,
         xml_assinado: assinatura.assinado,
         erro_assinatura: assinatura.erro,
-        erro_apps_script: erroAppsScript
+        erro_apps_script: erroAppsScript,
+        sefaz_auto_envio: false,
+        sefaz_status_url: `${BASE_URL}/sefaz/status`,
+        sefaz_envio_manual_url: `${BASE_URL}/nfce/${encodeURIComponent(id)}/enviar-sefaz`
       }
     });
   } catch (e) {
