@@ -202,6 +202,7 @@ const SEFAZ_CONFIG = {
   versao: "4.00",
   idLotePrefixo: process.env.SEFAZ_ID_LOTE_PREFIXO || "1",
   autorizacaoUrl: process.env.SEFAZ_NFCE_AUTORIZACAO_URL || "",
+  eventoUrl: process.env.SEFAZ_NFCE_EVENTO_URL || "",
   timeoutMs: Number(process.env.SEFAZ_TIMEOUT_MS || 30000)
 };
 
@@ -1901,6 +1902,269 @@ async function salvarRetornoSefazLocal(nota, retornoSefaz) {
 }
 
 
+
+// ================= CANCELAMENTO NFC-E =================
+//
+// Preparado para cancelamento por evento 110111.
+// Segurança: enquanto SEFAZ_HABILITADA=false, não transmite cancelamento.
+
+function motivoCancelamentoValido(motivo = "") {
+  const txt = String(motivo || "").trim();
+  return txt.length >= 15 && txt.length <= 255;
+}
+
+function obterProtocoloAutorizacao(nota = {}) {
+  return String(
+    nota.protocolo ||
+    nota.nProt ||
+    nota.sefaz?.nProt ||
+    nota.autorizacao?.nProt ||
+    ""
+  ).trim();
+}
+
+function notaEstaAutorizadaParaCancelar(nota = {}) {
+  const status = String(nota.status || "").toLowerCase();
+  const cStat = String(nota.sefaz?.cStat || "");
+  const protocolo = obterProtocoloAutorizacao(nota);
+
+  return !!protocolo && (
+    status === "autorizada" ||
+    status === "autorizado" ||
+    cStat === "100"
+  );
+}
+
+function gerarIdLoteEventoNfce(nota = {}) {
+  const numero = String(nota.numero || Date.now()).replace(/\D+/g, "");
+  const base = "9" + numero + Date.now();
+  return base.slice(-15).padStart(15, "0");
+}
+
+function gerarXmlEventoCancelamento(nota = {}, motivo = "") {
+  const chave = String(nota.chaveAcesso || nota.chave || "");
+  const protocolo = obterProtocoloAutorizacao(nota);
+  const nSeqEvento = "1";
+  const tpEvento = "110111";
+  const idEvento = "ID" + tpEvento + chave + nSeqEvento.padStart(2, "0");
+  const dhEvento = formatarDhEmi(new Date().toISOString());
+
+  if (!chave || chave.length !== 44) {
+    throw new Error("Chave de acesso inválida para cancelamento.");
+  }
+
+  if (!protocolo) {
+    throw new Error("Protocolo de autorização não encontrado. Só é possível cancelar NFC-e autorizada.");
+  }
+
+  if (!motivoCancelamentoValido(motivo)) {
+    throw new Error("Motivo do cancelamento deve ter entre 15 e 255 caracteres.");
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<evento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.00">
+  <infEvento Id="${esc(idEvento)}">
+    <cOrgao>${NFCE_CONFIG.cUF}</cOrgao>
+    <tpAmb>${NFCE_CONFIG.tpAmb}</tpAmb>
+    <CNPJ>${EMPRESA.cnpj}</CNPJ>
+    <chNFe>${esc(chave)}</chNFe>
+    <dhEvento>${dhEvento}</dhEvento>
+    <tpEvento>${tpEvento}</tpEvento>
+    <nSeqEvento>${nSeqEvento}</nSeqEvento>
+    <verEvento>1.00</verEvento>
+    <detEvento versao="1.00">
+      <descEvento>Cancelamento</descEvento>
+      <nProt>${esc(protocolo)}</nProt>
+      <xJust>${esc(motivo)}</xJust>
+    </detEvento>
+  </infEvento>
+</evento>`;
+}
+
+function obterIdInfEvento(xml) {
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  const infEvento = doc.getElementsByTagName("infEvento")[0];
+
+  if (!infEvento) {
+    throw new Error("Tag infEvento não encontrada para assinatura do cancelamento.");
+  }
+
+  const id = infEvento.getAttribute("Id");
+  if (!id) {
+    throw new Error("Atributo Id da infEvento não encontrado.");
+  }
+
+  return id;
+}
+
+function assinarXmlEvento(xmlEvento) {
+  const cert = carregarCertificadoFiscal();
+  const id = obterIdInfEvento(xmlEvento);
+
+  const sig = new SignedXml({
+    privateKey: cert.privateKeyPem,
+    publicCert: cert.certificatePem,
+    canonicalizationAlgorithm: "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+    signatureAlgorithm: "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
+  });
+
+  sig.addReference({
+    xpath: "//*[local-name(.)='infEvento']",
+    uri: "#" + id,
+    transforms: [
+      "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+      "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+    ],
+    digestAlgorithm: "http://www.w3.org/2000/09/xmldsig#sha1"
+  });
+
+  sig.keyInfoProvider = {
+    getKeyInfo() {
+      return `<X509Data><X509Certificate>${cert.certificateClean}</X509Certificate></X509Data>`;
+    }
+  };
+
+  sig.computeSignature(xmlEvento, {
+    location: {
+      reference: "//*[local-name(.)='infEvento']",
+      action: "after"
+    }
+  });
+
+  return sig.getSignedXml();
+}
+
+function tentarAssinarXmlEvento(xmlEvento) {
+  try {
+    return {
+      xml: assinarXmlEvento(xmlEvento),
+      assinado: true,
+      erro: null
+    };
+  } catch (e) {
+    console.error("⚠ falha ao assinar evento:", e.message);
+    return {
+      xml: xmlEvento,
+      assinado: false,
+      erro: e.message
+    };
+  }
+}
+
+function montarEnvelopeSoapRecepcaoEvento(xmlEventoAssinado, idLote) {
+  const xmlLimpo = String(xmlEventoAssinado || "")
+    .replace(/<\?xml[^>]*\?>/i, "")
+    .trim();
+
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4">
+      <envEvento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.00">
+        <idLote>${esc(idLote)}</idLote>
+        ${xmlLimpo}
+      </envEvento>
+    </nfeDadosMsg>
+  </soap12:Body>
+</soap12:Envelope>`;
+}
+
+function extrairRetornoEventoSefaz(xmlRetorno) {
+  const cStat = extrairTagXml(xmlRetorno, "cStat");
+  const xMotivo = extrairTagXml(xmlRetorno, "xMotivo");
+  const chNFe = extrairTagXml(xmlRetorno, "chNFe");
+  const tpEvento = extrairTagXml(xmlRetorno, "tpEvento");
+  const nSeqEvento = extrairTagXml(xmlRetorno, "nSeqEvento");
+  const nProt = extrairTagXml(xmlRetorno, "nProt");
+  const dhRegEvento = extrairTagXml(xmlRetorno, "dhRegEvento");
+
+  return {
+    cStat,
+    xMotivo,
+    chNFe,
+    tpEvento,
+    nSeqEvento,
+    nProt,
+    dhRegEvento,
+    cancelado: cStat === "135" || cStat === "155"
+  };
+}
+
+async function transmitirCancelamentoSefaz(nota, xmlEventoAssinado) {
+  if (!SEFAZ_CONFIG.habilitada) {
+    return {
+      ok: false,
+      transmitido: false,
+      pendente_habilitacao: true,
+      cStat: "",
+      xMotivo: "SEFAZ ainda não habilitada no sistema. Cancelamento não transmitido.",
+      xmlRetorno: ""
+    };
+  }
+
+  if (!SEFAZ_CONFIG.eventoUrl) {
+    return {
+      ok: false,
+      transmitido: false,
+      pendente_configuracao: true,
+      cStat: "",
+      xMotivo: "SEFAZ_NFCE_EVENTO_URL não configurada no Render.",
+      xmlRetorno: ""
+    };
+  }
+
+  carregarCertificadoFiscal();
+
+  const idLote = gerarIdLoteEventoNfce(nota);
+  const envelope = montarEnvelopeSoapRecepcaoEvento(xmlEventoAssinado, idLote);
+
+  const resposta = await httpsPostComCertificado(SEFAZ_CONFIG.eventoUrl, envelope, {
+    "SOAPAction": ""
+  });
+
+  const retorno = extrairRetornoEventoSefaz(resposta.body);
+
+  return {
+    ok: resposta.statusCode >= 200 && resposta.statusCode < 300,
+    transmitido: true,
+    idLote,
+    httpStatus: resposta.statusCode,
+    ...retorno,
+    xmlRetorno: resposta.body
+  };
+}
+
+async function salvarCancelamentoLocal(nota, dadosCancelamento) {
+  const atual = await lerNotaLocal(nota.id) || nota;
+
+  atual.cancelamento = {
+    solicitado: true,
+    transmitido: !!dadosCancelamento.transmitido,
+    cancelado: !!dadosCancelamento.cancelado,
+    motivo: dadosCancelamento.motivo || "",
+    cStat: dadosCancelamento.cStat || "",
+    xMotivo: dadosCancelamento.xMotivo || "",
+    nProt: dadosCancelamento.nProt || "",
+    dhRegEvento: dadosCancelamento.dhRegEvento || "",
+    httpStatus: dadosCancelamento.httpStatus || "",
+    xml_evento: dadosCancelamento.xmlEvento || "",
+    xml_retorno: dadosCancelamento.xmlRetorno || "",
+    atualizadoEm: new Date().toISOString()
+  };
+
+  if (dadosCancelamento.cancelado) {
+    atual.status = "cancelada";
+  } else if (dadosCancelamento.transmitido) {
+    atual.status = "cancelamento_rejeitado_ou_pendente";
+  } else if (dadosCancelamento.pendente_habilitacao || dadosCancelamento.pendente_configuracao) {
+    atual.status = atual.status || "autorizada";
+  }
+
+  await salvarNota(atual);
+  return atual;
+}
+
+
 // ================= ROTAS =================
 
 app.get("/", (req, res) => {
@@ -1988,6 +2252,7 @@ app.get("/sefaz/status", (req, res) => {
     ambiente: SEFAZ_CONFIG.ambiente,
     habilitada: SEFAZ_CONFIG.habilitada,
     autorizacao_url_configurada: !!SEFAZ_CONFIG.autorizacaoUrl,
+    evento_url_configurada: !!SEFAZ_CONFIG.eventoUrl,
     certificado_carregado: !!certificado,
     senha_configurada: !!CERT_PASSWORD,
     pronto_para_transmitir: !!(SEFAZ_CONFIG.habilitada && SEFAZ_CONFIG.autorizacaoUrl && certificado && CERT_PASSWORD),
@@ -2211,6 +2476,89 @@ app.get("/nfce/:id/pdf", async (req, res) => {
   }
   res.type("html").send(gerarHTML(nota));
 });
+
+
+app.post("/nfce/:id/cancelar", async (req, res) => {
+  try {
+    const nota = await lerNotaCompleta(req.params.id);
+    if (!nota) {
+      return res.status(404).json({ ok: false, error: "Nota não encontrada." });
+    }
+
+    const motivo = String(req.body?.motivo || req.body?.justificativa || "").trim();
+
+    if (!motivoCancelamentoValido(motivo)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Informe o motivo do cancelamento com 15 a 255 caracteres."
+      });
+    }
+
+    if (!notaEstaAutorizadaParaCancelar(nota)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Só é possível cancelar NFC-e autorizada e com protocolo salvo.",
+        status_atual: nota.status || "",
+        protocolo: obterProtocoloAutorizacao(nota) || ""
+      });
+    }
+
+    const xmlEvento = gerarXmlEventoCancelamento(nota, motivo);
+    const assinatura = tentarAssinarXmlEvento(xmlEvento);
+
+    if (!assinatura.assinado) {
+      return res.status(400).json({
+        ok: false,
+        error: "Evento de cancelamento não foi assinado.",
+        erro_assinatura: assinatura.erro
+      });
+    }
+
+    const retorno = await transmitirCancelamentoSefaz(nota, assinatura.xml);
+
+    const dadosCancelamento = {
+      ...retorno,
+      motivo,
+      xmlEvento: assinatura.xml
+    };
+
+    await salvarCancelamentoLocal(nota, dadosCancelamento);
+
+    res.json({
+      ok: retorno.ok,
+      transmitido: retorno.transmitido,
+      cancelado: retorno.cancelado,
+      pendente_habilitacao: !!retorno.pendente_habilitacao,
+      pendente_configuracao: !!retorno.pendente_configuracao,
+      cStat: retorno.cStat,
+      xMotivo: retorno.xMotivo,
+      nProt: retorno.nProt,
+      dhRegEvento: retorno.dhRegEvento,
+      httpStatus: retorno.httpStatus || null
+    });
+  } catch (e) {
+    res.status(400).json({
+      ok: false,
+      error: e.message || "Erro ao cancelar NFC-e."
+    });
+  }
+});
+
+app.get("/nfce/:id/cancelamento", async (req, res) => {
+  const nota = await lerNotaCompleta(req.params.id);
+  if (!nota) {
+    return res.status(404).json({ ok: false, error: "Nota não encontrada." });
+  }
+
+  res.json({
+    ok: true,
+    id: nota.id,
+    status: nota.status || "",
+    protocolo_autorizacao: obterProtocoloAutorizacao(nota),
+    cancelamento: nota.cancelamento || null
+  });
+});
+
 
 // ====== ROTAS ANTIGAS ======
 
