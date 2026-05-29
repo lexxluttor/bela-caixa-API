@@ -1705,6 +1705,41 @@ async function responderZipPeriodo(res, inicio, fim) {
 }
 
 
+
+// ================= ESTABILIDADE NFC-E =================
+
+function notaJaAutorizada(nota = {}) {
+  return !!(
+    String(nota.status || "").toLowerCase() === "autorizada" ||
+    String(nota.sefaz?.cStat || "") === "100" ||
+    obterProtocoloAutorizacao(nota)
+  );
+}
+
+function notaJaCancelada(nota = {}) {
+  const status = String(nota.status || "").toLowerCase();
+  return (
+    status.includes("cancel") ||
+    String(nota.cancelamento?.cStat || "") === "135" ||
+    String(nota.cancelamento?.cStat || "") === "155"
+  );
+}
+
+function criarResumoFiscal(nota = {}) {
+  return {
+    status: nota.status || "",
+    numero: nota.numero || "",
+    serie: nota.serie || "",
+    chave: nota.chaveAcesso || nota.chave || "",
+    protocolo: nota.protocolo || nota.sefaz?.nProt || "",
+    autorizada: notaJaAutorizada(nota),
+    cancelada: notaJaCancelada(nota),
+    cStat: nota.sefaz?.cStat || "",
+    xMotivo: nota.sefaz?.xMotivo || ""
+  };
+}
+
+
 // ================= SEFAZ / AUTORIZAÇÃO NFC-E =================
 //
 // Camada preparada para transmissão SEFAZ.
@@ -1893,9 +1928,12 @@ async function salvarRetornoSefazLocal(nota, retornoSefaz) {
     atual.status = "autorizada";
     atual.protocolo = retornoSefaz.nProt || "";
     atual.xml_autorizado = retornoSefaz.nfeProc || "";
+    atual.autorizada_em = new Date().toISOString();
   } else if (retornoSefaz.transmitido) {
-    atual.status = "rejeitada_ou_pendente";
+    atual.status = retornoSefaz.cStat ? "rejeitada" : "pendente";
   }
+
+  atual.resumoFiscal = criarResumoFiscal(atual);
 
   await salvarNota(atual);
   return atual;
@@ -1924,6 +1962,13 @@ function obterProtocoloAutorizacao(nota = {}) {
 }
 
 function notaEstaAutorizadaParaCancelar(nota = {}) {
+
+  if (notaJaCancelada(nota)) {
+    return {
+      ok: false,
+      error: "NFC-e já cancelada."
+    };
+  }
   const status = String(nota.status || "").toLowerCase();
   const cStat = String(nota.sefaz?.cStat || "");
   const protocolo = obterProtocoloAutorizacao(nota);
@@ -2603,7 +2648,34 @@ app.get("/xml/periodo", async (req, res) => {
 ensureDirs()
   .then(carregarSequencial)
   .then(() => {
-    app.listen(PORT, () => {
+    
+app.get("/nfce/:id/status", async (req, res) => {
+  try {
+    const nota = await lerNotaLocal(req.params.id);
+
+    if (!nota) {
+      return res.status(404).json({
+        ok: false,
+        error: "NFC-e não encontrada."
+      });
+    }
+
+    return res.json({
+      ok: true,
+      resumoFiscal: criarResumoFiscal(nota),
+      sefaz: nota.sefaz || {},
+      cancelamento: nota.cancelamento || {}
+    });
+  } catch (e) {
+    return res.status(500).json({
+      ok: false,
+      error: e.message
+    });
+  }
+});
+
+
+app.listen(PORT, () => {
       console.log(`Bela Caixa API rodando na porta ${PORT}`);
       console.log(`Apps Script configurado: ${API_BELA_SHEETS ? "sim" : "não"}`);
     });
