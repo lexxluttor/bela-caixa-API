@@ -1248,20 +1248,28 @@ function makeZip(files) {
 // ================= HTML CUPOM =================
 
 function gerarHTML(nota) {
-  const itens = (nota.itens || []).map((item) => {
+  const itens = (nota.itens || []).map((item, idx) => {
     const codigoExibido = item.ean || item.codigo || "-";
-
+    const qtd = Number(item.quantidade || 0);
+    const valorUnit = Number(item.valorUnitario || (Number(item.valorTotal || 0) / (qtd || 1)) || 0);
     return `
 <tr>
-  <td>${esc(item.descricao)}</td>
-  <td>${item.quantidade}</td>
-  <td>R$ ${moeda(item.valorTotal)}</td>
-</tr>
-<tr class="linha-codigo">
-  <td colspan="3">${esc(codigoExibido)}</td>
-</tr>
-`;
+  <td class="col-num">${idx + 1}</td>
+  <td class="col-cod">${esc(codigoExibido)}</td>
+  <td class="col-desc">${esc(item.descricao)}</td>
+  <td class="col-qtd">${quantidadeFiscal(qtd).replace(".", ",")}</td>
+  <td class="col-un">${esc(item.unidade || "UN")}</td>
+  <td class="col-vu">${moeda(valorUnit)}</td>
+  <td class="col-vt">${moeda(item.valorTotal || 0)}</td>
+</tr>`;
   }).join("");
+
+  const qtdItens = (nota.itens || []).reduce((s, item) => s + Number(item.quantidade || 0), 0);
+  const chave = nota.chaveAcesso || nota.chave || nota.id || "";
+  const chaveFormatada = String(chave).replace(/\\D/g, "").replace(/(.{4})/g, "$1 ").trim();
+  const protocolo = nota.protocolo || nota.sefaz?.nProt || "";
+  const dataAut = nota.sefaz?.dhRecbto || nota.autorizada_em || "";
+  const ambiente = NFCE_CONFIG.tpAmb === "1" ? "Produção" : "Homologação";
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -1269,273 +1277,113 @@ function gerarHTML(nota) {
 <meta charset="UTF-8">
 <title>NFC-e ${nota.numero}</title>
 <style>
-body{
-  margin:0;
-  padding:0;
-  background:#f5f5f5;
-  font-family:Arial, Helvetica, sans-serif;
-}
-.cupom{
-  width:80mm;
-  max-width:80mm;
-  margin:10px auto;
-  background:#fff;
-  color:#000;
-  padding:8px;
-  box-sizing:border-box;
-  font-size:12px;
-}
+*{box-sizing:border-box;}
+body{margin:0;padding:0;background:#f4f4f4;color:#000;font-family:Arial, Helvetica, sans-serif;}
+.cupom{width:80mm;max-width:80mm;margin:8px auto;background:#fff;padding:4mm;font-size:11px;line-height:1.25;}
 .center{text-align:center;}
-.logo{
-  width:70px;
-  max-height:70px;
-  object-fit:contain;
-  margin-bottom:6px;
-}
-.nome-loja{
-  font-size:22px;
-  font-weight:bold;
-  margin-bottom:4px;
-}
-.info-empresa{
-  line-height:1.4;
-  font-size:11px;
-}
-.sep{
-  border-top:1px dashed #000;
-  margin:10px 0;
-}
-.titulo{
-  text-align:center;
-  font-weight:bold;
-  font-size:14px;
-  margin:8px 0;
-}
-.info{
-  line-height:1.6;
-  font-size:12px;
-}
-table{
-  width:100%;
-  border-collapse:collapse;
-  margin-top:5px;
-}
-th{
-  border-bottom:1px solid #000;
-  padding-bottom:4px;
-  font-size:11px;
-  text-align:left;
-}
-th:last-child, td:last-child{text-align:right;}
-th:nth-child(2), td:nth-child(2){
-  text-align:center;
-  width:40px;
-}
-td{
-  vertical-align:top;
-  padding:3px 0;
-  font-size:11px;
-}
-.linha-codigo td{
-  font-size:10px;
-  color:#555;
-  padding-bottom:6px;
-  text-align:left;
-}
-.resumo{margin-top:10px;}
-.resumo-linha{
-  display:flex;
-  justify-content:space-between;
-  margin-bottom:4px;
-}
-.total{
-  font-size:20px;
-  font-weight:bold;
-  border-top:1px dashed #000;
-  border-bottom:1px dashed #000;
-  padding:8px 0;
-  margin-top:8px;
-}
-.pagamento{
-  margin-top:10px;
-  text-align:center;
-  border:1px dashed #000;
-  padding:8px;
-}
-.pagamento strong{font-size:14px;}
-.qrcode{
-  margin-top:12px;
-  text-align:center;
-}
-.qrcode-box{
-  width:120px;
-  height:120px;
-  border:1px solid #ccc;
-  margin:0 auto 8px;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  font-size:11px;
-}
-.chave{
-  font-size:10px;
-  word-break:break-all;
-  line-height:1.4;
-}
-.msg{
-  margin-top:12px;
-  text-align:center;
-  font-size:12px;
-  line-height:1.6;
-}
-.rodape{
-  margin-top:12px;
-  font-size:10px;
-  text-align:center;
-  color:#444;
-}
-.btns{
-  margin-top:15px;
-  display:flex;
-  justify-content:center;
-  gap:8px;
-}
-button{
-  border:none;
-  background:#000;
-  color:#fff;
-  padding:8px 12px;
-  border-radius:6px;
-  cursor:pointer;
-  font-size:12px;
-}
-@page{
-  size:80mm auto;
-  margin:2mm;
-}
-@media print{
-  body{background:#fff;}
-  .cupom{
-    margin:0 auto;
-    width:80mm;
-    max-width:80mm;
-  }
-  .btns{display:none;}
-}
+.loja{font-size:25px;font-weight:900;letter-spacing:.5px;margin:0 0 4px;}
+.empresa{font-size:13px;line-height:1.25;font-weight:700;}
+.sep{border-top:1px dashed #000;margin:8px 0;}
+.titulo{text-align:center;font-size:15px;line-height:1.25;font-weight:900;margin:6px 0;}
+.info{font-size:11px;line-height:1.55;}
+.tabela{width:100%;border-collapse:collapse;font-size:10px;}
+.tabela th{text-align:left;border-bottom:1px solid #000;padding:3px 1px;font-weight:900;}
+.tabela td{padding:3px 1px;vertical-align:top;}
+.col-num{width:10px;text-align:left;}
+.col-cod{width:44px;}
+.col-desc{width:auto;}
+.col-qtd{width:34px;text-align:right;}
+.col-un{width:20px;text-align:center;}
+.col-vu{width:38px;text-align:right;}
+.col-vt{width:42px;text-align:right;font-weight:700;}
+.resumo-linha{display:flex;justify-content:space-between;font-size:12px;margin:4px 0;font-weight:800;}
+.valor-pagar{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;margin:7px 0;}
+.valor-pagar .label{font-size:19px;font-weight:900;}
+.valor-pagar .valor{font-size:26px;font-weight:900;}
+.pagamento{display:flex;justify-content:space-between;gap:8px;margin-top:5px;font-size:12px;}
+.pagamento b{font-size:14px;}
+.consulta{text-align:center;font-size:11px;line-height:1.35;}
+.chave-box{border:1px solid #000;margin:7px 0;text-align:center;}
+.chave-box .rotulo{border-bottom:1px solid #000;font-weight:900;padding:2px;font-size:12px;}
+.chave-box .numero{padding:4px 2px;font-size:12px;word-break:break-word;}
+.qr-row{display:flex;gap:8px;align-items:flex-start;margin-top:7px;}
+.qrcode-box{width:82px;min-width:82px;height:82px;}
+.qrcode-box img{width:82px;height:82px;}
+.qr-info{font-size:11px;line-height:1.45;flex:1;}
+.msg{text-align:center;font-size:11px;line-height:1.45;}
+.msg .deus{font-size:13px;font-weight:900;}
+.social{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;font-size:10.5px;font-weight:700;margin-top:6px;}
+.rodape{text-align:center;font-size:10px;line-height:1.35;font-weight:700;}
+.btns{margin:12px auto;display:flex;justify-content:center;gap:8px;}
+button{border:none;background:#111;color:#fff;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:12px;}
+@page{size:80mm auto;margin:2mm;}
+@media print{body{background:#fff;}.cupom{margin:0 auto;width:80mm;max-width:80mm;}.btns{display:none;}}
 </style>
 </head>
 <body>
-
 <div class="cupom">
-
   <div class="center">
-    ${LOGO_URL ? `<img src="${LOGO_URL}" class="logo" alt="Logo Bela Modas">` : ""}
-
-    <div class="nome-loja">
-      ${esc(EMPRESA.nome_fantasia)}
-    </div>
-
-    <div class="info-empresa">
+    <div class="loja">BELA MODAS</div>
+    <div class="empresa">
       ${esc(EMPRESA.razao_social)}<br>
-      CNPJ ${formatarCNPJ(EMPRESA.cnpj)}<br>
-      IE ${esc(EMPRESA.ie)}<br>
-      ${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)}<br>
-      ${esc(EMPRESA.bairro)} - ${esc(EMPRESA.cidade)}/${esc(EMPRESA.uf)}<br>
-      CEP ${formatarCEP(EMPRESA.cep)}<br>
-      Tel ${formatarTelefone(EMPRESA.fone)}
+      CNPJ: ${formatarCNPJ(EMPRESA.cnpj)} &nbsp; IE: ${esc(EMPRESA.ie)}<br>
+      ${esc(EMPRESA.logradouro)}, ${esc(EMPRESA.numero)} - ${esc(EMPRESA.bairro)}<br>
+      ${esc(EMPRESA.cidade)} - ${esc(EMPRESA.uf)} - CEP: ${formatarCEP(EMPRESA.cep)}<br>
+      Fone: ${formatarTelefone(EMPRESA.fone)}
     </div>
   </div>
-
   <div class="sep"></div>
-
-  <div class="titulo">DANFE NFC-e</div>
-
+  <div class="titulo">DANFE NFC-e - Documento Auxiliar<br>da Nota Fiscal de Consumidor Eletrônica</div>
+  <div class="sep"></div>
   <div class="info">
-    <strong>Número:</strong> ${nota.numero}<br>
-    <strong>Série:</strong> ${nota.serie}<br>
-    <strong>Data:</strong> ${esc(nota.dataEmissaoBR)}<br>
+    <strong>NFC-e nº:</strong> ${nota.numero} &nbsp; <strong>Série:</strong> ${nota.serie}<br>
+    <strong>Data de Emissão:</strong> ${esc(nota.dataEmissaoBR)}<br>
     <strong>Cliente:</strong> ${esc(nota.cliente?.nome || "Consumidor")}
   </div>
-
   <div class="sep"></div>
-
-  <table>
-    <thead>
-      <tr>
-        <th>Descrição</th>
-        <th>Qtd</th>
-        <th>Total</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${itens}
-    </tbody>
+  <table class="tabela">
+    <thead><tr><th>#</th><th>CÓDIGO</th><th>DESCRIÇÃO</th><th>QTD</th><th>UN</th><th>VL UNIT</th><th>VL TOTAL</th></tr></thead>
+    <tbody>${itens}</tbody>
   </table>
-
   <div class="sep"></div>
-
-  <div class="resumo">
-    <div class="resumo-linha">
-      <span>Qtd itens</span>
-      <span>${(nota.itens || []).reduce((s, item) => s + Number(item.quantidade || 0), 0)}</span>
-    </div>
-    <div class="resumo-linha">
-      <span>Subtotal</span>
-      <span>R$ ${moeda(nota.subtotal || 0)}</span>
-    </div>
-    <div class="resumo-linha">
-      <span>Desconto</span>
-      <span>R$ ${moeda(nota.desconto || 0)}</span>
-    </div>
-    <div class="resumo-linha total">
-      <span><span style="font-size:34px;font-weight:bold;">TOTAL</span></span>
-      <span>R$ ${moeda(nota.total || 0)}</span>
-    </div>
-  </div>
-
+  <div class="resumo-linha"><span>QTD. TOTAL DE ITENS</span><span>${qtdItens}</span></div>
+  <div class="resumo-linha"><span>VALOR TOTAL R$</span><span>${moeda(nota.subtotal || nota.total || 0)}</span></div>
+  <div class="resumo-linha"><span>DESCONTO R$</span><span>${moeda(nota.desconto || 0)}</span></div>
+  <div class="valor-pagar"><div class="label">VALOR A PAGAR R$</div><div class="valor">${moeda(nota.total || 0)}</div></div>
   <div class="pagamento">
-    <div>Forma pagamento</div>
-    <strong>${esc(nota.pagamento?.tipo || "DINHEIRO")}</strong>
-    <div style="margin-top:5px;">
-      Valor pago: R$ ${moeda(nota.pagamento?.valor || nota.total || 0)}
-    </div>
+    <div><strong>FORMA DE PAGAMENTO</strong><br>${esc(nota.pagamento?.tipo || "DINHEIRO")}</div>
+    <div style="text-align:right;"><strong>VALOR PAGO R$</strong><br>${moeda(nota.pagamento?.valor || nota.total || 0)}</div>
   </div>
-
-  <div class="qrcode">
-    <div class="qrcode-box">
-      ${nota.qrCodeUrl ? `<img src="${gerarImagemQRCodeUrl(nota.qrCodeUrl)}" alt="QR Code NFC-e" style="width:118px;height:118px;">` : "QR CODE NFC-e"}
-    </div>
-
-    <div style="font-size:11px;line-height:1.5;">
-      Consulte pela chave de acesso em:<br>
-      <strong>${esc(NFCE_CONFIG.urlConsulta)}</strong>
-    </div>
-
-    <div class="chave">
-      ${esc(nota.chaveAcesso || nota.chave || nota.id)}
-    </div>
-  </div>
-
-  <div class="msg">
-    DEUS É FIEL<br>Agradecemos a preferência!<br>
-    Volte sempre!<br>Aceitamos trocas em até 7 dias mediante apresentação deste cupom.<br><br>Instagram: @bela_modas9169<br>Instagram: @belamodaspetro<br>WhatsApp: (31) 99733-7304
-  </div>
-
   <div class="sep"></div>
-
+  <div class="consulta"><strong>Consulte pela Chave de Acesso em</strong><br><strong>${esc(NFCE_CONFIG.urlConsulta)}</strong></div>
+  <div class="chave-box"><div class="rotulo">CHAVE DE ACESSO</div><div class="numero">${esc(chaveFormatada || chave)}</div></div>
+  <div class="qr-row">
+    <div class="qrcode-box">${nota.qrCodeUrl ? `<img src="${gerarImagemQRCodeUrl(nota.qrCodeUrl)}" alt="QR Code NFC-e">` : "QR CODE"}</div>
+    <div class="qr-info">
+      <strong>NFC-e nº</strong> ${nota.numero} &nbsp; <strong>Série</strong> ${String(nota.serie || 1).padStart(3, "0")}<br>
+      ${protocolo ? `<strong>Protocolo de Autorização:</strong> ${esc(protocolo)}<br>` : ""}
+      ${dataAut ? `<strong>Data de Autorização:</strong> ${esc(dataAut)}<br>` : ""}
+      <strong>Data de Emissão:</strong> ${esc(nota.dataEmissaoBR)}<br>
+      <strong>Ambiente:</strong> ${esc(ambiente)}<br>
+      <strong>Versão XML:</strong> 4.00
+    </div>
+  </div>
+  <div class="sep"></div>
+  <div class="msg">
+    <div class="deus">“DEUS É FIEL”</div>
+    Agradecemos a preferência! Volte sempre!<br>
+    Aceitamos trocas em até 15 dias mediante apresentação deste cupom.
+    <div class="social"><span>@bela_modas9169</span><span>@belamodaspetro</span><span>(31) 99733-7304</span></div>
+  </div>
+  <div class="sep"></div>
   <div class="rodape">
     Documento emitido por ME/EPP optante pelo Simples Nacional.<br>
-    ${esc(textoHomologacao())}.<br><br>
+    ${esc(textoHomologacao())}.<br>
+    Tributos Totais Incidentes conforme legislação aplicável.<br>
     Impresso em ${esc(nota.dataEmissaoBR)}
   </div>
-
 </div>
-
-<div class="btns">
-  <button onclick="window.print()">Imprimir</button>
-  <button onclick="window.close()">Fechar</button>
-</div>
-
+<div class="btns"><button onclick="window.print()">Imprimir</button><button onclick="window.close()">Fechar</button></div>
 </body>
 </html>`;
 }
