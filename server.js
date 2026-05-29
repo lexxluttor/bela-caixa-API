@@ -1488,7 +1488,7 @@ button{
       <span>R$ ${moeda(nota.desconto || 0)}</span>
     </div>
     <div class="resumo-linha total">
-      <span>TOTAL</span>
+      <span><span style="font-size:34px;font-weight:bold;">TOTAL</span></span>
       <span>R$ ${moeda(nota.total || 0)}</span>
     </div>
   </div>
@@ -1517,8 +1517,8 @@ button{
   </div>
 
   <div class="msg">
-    Obrigado pela preferência!<br>
-    Volte sempre.
+    DEUS É FIEL<br>Agradecemos a preferência!<br>
+    Volte sempre!<br>Aceitamos trocas em até 7 dias mediante apresentação deste cupom.<br><br>Instagram: @bela_modas9169<br>Instagram: @belamodaspetro<br>WhatsApp: (31) 99733-7304
   </div>
 
   <div class="sep"></div>
