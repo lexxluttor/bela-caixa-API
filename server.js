@@ -385,9 +385,37 @@ function formatarDhEmi(iso) {
   return partes + "-03:00";
 }
 
+function gtinValido(v) {
+  const gtin = somenteDigitos(v || "");
+
+  // GTIN aceitos no leiaute fiscal: GTIN-8, GTIN-12, GTIN-13 e GTIN-14.
+  if (![8, 12, 13, 14].includes(gtin.length)) return false;
+
+  const corpo = gtin.slice(0, -1);
+  const digitoInformado = Number(gtin.slice(-1));
+
+  let soma = 0;
+  let peso = 3;
+
+  // Cálculo GS1 da direita para a esquerda, alternando pesos 3 e 1.
+  for (let i = corpo.length - 1; i >= 0; i--) {
+    soma += Number(corpo[i]) * peso;
+    peso = peso === 3 ? 1 : 3;
+  }
+
+  const digitoCalculado = (10 - (soma % 10)) % 10;
+  return digitoCalculado === digitoInformado;
+}
+
 function tagEAN(v) {
-  const ean = somenteDigitos(v || "");
-  return ean ? ean : "SEM GTIN";
+  const valorOriginal = String(v || "").trim().toUpperCase();
+
+  if (!valorOriginal || valorOriginal === "SEM GTIN") {
+    return "SEM GTIN";
+  }
+
+  const ean = somenteDigitos(valorOriginal);
+  return gtinValido(ean) ? ean : "SEM GTIN";
 }
 
 function quantidadeFiscal(v) {
