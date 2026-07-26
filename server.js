@@ -541,7 +541,30 @@ function assinarXmlNFe(xml) {
     }
   });
 
-  return sig.getSignedXml();
+  const xmlAssinado = sig.getSignedXml();
+
+  // A assinatura referencia somente infNFe. Depois de calculada, movemos
+  // Signature para o final de NFe, após infNFeSupl, sem alterar o conteúdo
+  // assinado nem o DigestValue.
+  const assinaturaMatch = xmlAssinado.match(
+    /<Signature\\b[^>]*>[\\s\\S]*?<\\/Signature>/i
+  );
+
+  if (!assinaturaMatch) {
+    throw new Error("Assinatura XML não encontrada após computeSignature.");
+  }
+
+  const assinaturaXml = assinaturaMatch[0];
+  const xmlSemAssinatura = xmlAssinado.replace(assinaturaXml, "");
+
+  if (!/<\\/NFe>\\s*$/i.test(xmlSemAssinatura)) {
+    throw new Error("Tag final NFe não encontrada para reposicionar a assinatura.");
+  }
+
+  return xmlSemAssinatura.replace(
+    /<\\/NFe>\\s*$/i,
+    `${assinaturaXml}</NFe>`
+  );
 }
 
 function tentarAssinarXmlNFe(xml) {
