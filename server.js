@@ -192,7 +192,7 @@ const NFCE_CONFIG = {
 };
 
 // Para NFC-e real, informe no Render:
- // CSC_ID=000001
+ // CSC_ID=1
  // CSC_TOKEN=token_csc_fornecido_pela_sefaz_mg
  // Em homologação, sem CSC configurado, a API gera QR Code técnico de teste.
 const SEFAZ_CONFIG = {
@@ -277,6 +277,16 @@ function esc(s = "") {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function textoFiscalXml(v = "") {
+  return String(v || "")
+    .replace(/[–—]/g, "-")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[^\x20-\xFF]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function toNumber(v, padrao = 0) {
@@ -1025,7 +1035,7 @@ function gerarXML(nota) {
       <prod>
         <cProd>${esc(item.codigo || String(idx + 1))}</cProd>
         <cEAN>${esc(item.ean || "SEM GTIN")}</cEAN>
-        <xProd>${esc(item.descricao)}</xProd>
+        <xProd>${esc(textoFiscalXml(item.descricao))}</xProd>
         <NCM>${esc(item.ncm)}</NCM>${cestXml}
         <CFOP>${esc(item.cfop)}</CFOP>
         <uCom>${esc(item.unidade)}</uCom>
