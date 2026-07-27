@@ -1150,7 +1150,6 @@ ${itensXml}
     </transp>
     <pag>
       <detPag>
-        <indPag>0</indPag>
         <tPag>${mapearFormaPagamentoFiscal(nota.pagamento?.tipo)}</tPag>
         <vPag>${dinheiro(nota.pagamento?.valor || nota.total)}</vPag>
       </detPag>
