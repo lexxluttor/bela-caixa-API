@@ -547,7 +547,7 @@ function assinarXmlNFe(xml) {
   // Signature para o final de NFe, após infNFeSupl, sem alterar o conteúdo
   // assinado nem o DigestValue.
   const assinaturaMatch = xmlAssinado.match(
-    /<Signature\\b[^>]*>[\\s\\S]*?<\\/Signature>/i
+    /<Signature\b[^>]*>[\s\S]*?<\/Signature>/i
   );
 
   if (!assinaturaMatch) {
@@ -557,12 +557,12 @@ function assinarXmlNFe(xml) {
   const assinaturaXml = assinaturaMatch[0];
   const xmlSemAssinatura = xmlAssinado.replace(assinaturaXml, "");
 
-  if (!/<\\/NFe>\\s*$/i.test(xmlSemAssinatura)) {
+  if (!/<\/NFe>\s*$/i.test(xmlSemAssinatura)) {
     throw new Error("Tag final NFe não encontrada para reposicionar a assinatura.");
   }
 
   return xmlSemAssinatura.replace(
-    /<\\/NFe>\\s*$/i,
+    /<\/NFe>\s*$/i,
     `${assinaturaXml}</NFe>`
   );
 }
