@@ -1684,36 +1684,79 @@ function extrairTagXml(texto, tag) {
   return m ? m[1].trim() : "";
 }
 
+function extrairBlocoXml(texto, tag) {
+  const re = new RegExp(
+    "<(?:\\w+:)?" + tag + "\\b[^>]*>[\\s\\S]*?</(?:\\w+:)?" + tag + ">",
+    "i"
+  );
+  const m = String(texto || "").match(re);
+  return m ? m[0] : "";
+}
+
 function extrairRetornoSefaz(xmlRetorno) {
-  const cStat = extrairTagXml(xmlRetorno, "cStat");
-  const xMotivo = extrairTagXml(xmlRetorno, "xMotivo");
-  const nRec = extrairTagXml(xmlRetorno, "nRec");
-  const nProt = extrairTagXml(xmlRetorno, "nProt");
-  const chNFe = extrairTagXml(xmlRetorno, "chNFe");
-  const dhRecbto = extrairTagXml(xmlRetorno, "dhRecbto");
+  const xml = String(xmlRetorno || "");
+
+  // O retorno síncrono pode trazer cStat=104 no lote e, dentro de protNFe,
+  // o resultado real da NFC-e, como 100 (autorizada) ou uma rejeição.
+  const blocoProtNFe = extrairBlocoXml(xml, "protNFe");
+  const fonteProtocolo = blocoProtNFe || "";
+
+  const cStatLote = extrairTagXml(xml, "cStat");
+  const xMotivoLote = extrairTagXml(xml, "xMotivo");
+
+  const cStatProtocolo = fonteProtocolo
+    ? extrairTagXml(fonteProtocolo, "cStat")
+    : "";
+  const xMotivoProtocolo = fonteProtocolo
+    ? extrairTagXml(fonteProtocolo, "xMotivo")
+    : "";
+
+  const cStat = cStatProtocolo || cStatLote;
+  const xMotivo = xMotivoProtocolo || xMotivoLote;
+  const nRec = extrairTagXml(xml, "nRec");
+  const nProt = fonteProtocolo
+    ? extrairTagXml(fonteProtocolo, "nProt")
+    : extrairTagXml(xml, "nProt");
+  const chNFe = fonteProtocolo
+    ? extrairTagXml(fonteProtocolo, "chNFe")
+    : extrairTagXml(xml, "chNFe");
+  const dhRecbto = fonteProtocolo
+    ? extrairTagXml(fonteProtocolo, "dhRecbto")
+    : extrairTagXml(xml, "dhRecbto");
 
   return {
     cStat,
     xMotivo,
+    cStatLote,
+    xMotivoLote,
+    cStatProtocolo,
+    xMotivoProtocolo,
     nRec,
     nProt,
     chNFe,
     dhRecbto,
-    autorizado: cStat === "100",
-    recebido: cStat === "103" || cStat === "104" || !!nRec
+    protocoloEncontrado: !!blocoProtNFe,
+    autorizado: cStatProtocolo === "100",
+    recebido:
+      cStatLote === "103" ||
+      cStatLote === "104" ||
+      !!nRec ||
+      !!blocoProtNFe
   };
 }
 
 function montarNfeProc(xmlAssinado, xmlRetorno) {
-  const protMatch = String(xmlRetorno || "").match(/<protNFe[\s\S]*?<\/protNFe>/i);
-  if (!protMatch) return "";
+  const protNFe = extrairBlocoXml(xmlRetorno, "protNFe");
+  if (!protNFe) return "";
 
-  const nfeSemDecl = String(xmlAssinado || "").replace(/<\?xml[^>]*\?>/i, "").trim();
+  const nfeSemDecl = String(xmlAssinado || "")
+    .replace(/<\?xml[^>]*\?>/i, "")
+    .trim();
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
 ${nfeSemDecl}
-${protMatch[0]}
+${protNFe}
 </nfeProc>`;
 }
 
@@ -1797,6 +1840,10 @@ async function salvarRetornoSefazLocal(nota, retornoSefaz) {
     tipoFalha: retornoSefaz.tipoFalha || "",
     cStat: retornoSefaz.cStat || "",
     xMotivo: retornoSefaz.xMotivo || "",
+    cStatLote: retornoSefaz.cStatLote || "",
+    xMotivoLote: retornoSefaz.xMotivoLote || "",
+    cStatProtocolo: retornoSefaz.cStatProtocolo || "",
+    xMotivoProtocolo: retornoSefaz.xMotivoProtocolo || "",
     nRec: retornoSefaz.nRec || "",
     nProt: retornoSefaz.nProt || "",
     chNFe: retornoSefaz.chNFe || "",
@@ -2257,6 +2304,10 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
       pendente_reenvio: !!notaAtualizada.pendente_reenvio,
       cStat: retornoSefaz.cStat || "",
       xMotivo: retornoSefaz.xMotivo || "",
+      cStatLote: retornoSefaz.cStatLote || "",
+      xMotivoLote: retornoSefaz.xMotivoLote || "",
+      cStatProtocolo: retornoSefaz.cStatProtocolo || "",
+      xMotivoProtocolo: retornoSefaz.xMotivoProtocolo || "",
       nRec: retornoSefaz.nRec || "",
       nProt: retornoSefaz.nProt || "",
       chNFe: retornoSefaz.chNFe || "",
@@ -2442,6 +2493,10 @@ app.post("/nfce/emitir", async (req, res) => {
         autorizado: !!retornoSefaz.autorizado,
         cStat: retornoSefaz.cStat || "",
         xMotivo: retornoSefaz.xMotivo || "",
+        cStatLote: retornoSefaz.cStatLote || "",
+        xMotivoLote: retornoSefaz.xMotivoLote || "",
+        cStatProtocolo: retornoSefaz.cStatProtocolo || "",
+        xMotivoProtocolo: retornoSefaz.xMotivoProtocolo || "",
         nRec: retornoSefaz.nRec || "",
         nProt: retornoSefaz.nProt || "",
         chNFe: retornoSefaz.chNFe || "",
