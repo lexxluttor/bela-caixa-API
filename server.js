@@ -507,6 +507,43 @@ function obterIdInfNFe(xml) {
   return id;
 }
 
+function validarAssinaturaXmlNFe(xmlAssinado) {
+  const cert = carregarCertificadoFiscal();
+  const doc = new DOMParser().parseFromString(xmlAssinado, "text/xml");
+  const assinaturaNode = doc.getElementsByTagName("Signature")[0];
+
+  if (!assinaturaNode) {
+    return {
+      valida: false,
+      erro: "Tag Signature não encontrada no XML assinado."
+    };
+  }
+
+  try {
+    const verificador = new SignedXml({
+      publicCert: cert.certificatePem,
+      idAttribute: "Id",
+      // A validação usa explicitamente o certificado A1 carregado no servidor.
+      // Assim não dependemos de interpretar um certificado potencialmente
+      // adulterado dentro do próprio XML recebido.
+      getCertFromKeyInfo: () => null
+    });
+
+    verificador.loadSignature(assinaturaNode);
+    const valida = verificador.checkSignature(xmlAssinado);
+
+    return {
+      valida: !!valida,
+      erro: valida ? null : "DigestValue ou SignatureValue inválido."
+    };
+  } catch (e) {
+    return {
+      valida: false,
+      erro: e.message || "Falha ao validar a assinatura XML."
+    };
+  }
+}
+
 function assinarXmlNFe(xml) {
   const cert = carregarCertificadoFiscal();
   const id = obterIdInfNFe(xml);
@@ -514,6 +551,7 @@ function assinarXmlNFe(xml) {
   const sig = new SignedXml({
     privateKey: cert.privateKeyPem,
     publicCert: cert.certificatePem,
+    idAttribute: "Id",
     canonicalizationAlgorithm: "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
     signatureAlgorithm: "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
   });
@@ -541,7 +579,17 @@ function assinarXmlNFe(xml) {
     }
   });
 
-  return sig.getSignedXml();
+  const xmlAssinado = sig.getSignedXml();
+  const validacao = validarAssinaturaXmlNFe(xmlAssinado);
+
+  if (!validacao.valida) {
+    throw new Error(
+      "A assinatura XML foi gerada, mas falhou na validação local: " +
+      (validacao.erro || "motivo não informado")
+    );
+  }
+
+  return xmlAssinado;
 }
 
 function tentarAssinarXmlNFe(xml) {
@@ -2132,6 +2180,35 @@ app.get("/assinatura/status", (req, res) => {
     });
   }
 });
+
+app.post("/assinatura/validar", (req, res) => {
+  try {
+    const xml = String(req.body?.xml || "");
+
+    if (!xml.trim()) {
+      return res.status(400).json({
+        ok: false,
+        valida: false,
+        error: "Envie o XML no campo xml do corpo JSON."
+      });
+    }
+
+    const resultado = validarAssinaturaXmlNFe(xml);
+
+    return res.status(resultado.valida ? 200 : 400).json({
+      ok: resultado.valida,
+      valida: resultado.valida,
+      erro: resultado.erro
+    });
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      valida: false,
+      error: e.message || "Erro ao validar assinatura XML."
+    });
+  }
+});
+
 
 app.get("/assinatura/debug", (req, res) => {
   res.json({
