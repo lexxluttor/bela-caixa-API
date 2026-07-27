@@ -1765,12 +1765,36 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
   };
 }
 
+function criarRetornoFalhaTransmissao(erro) {
+  const mensagem = erro?.message || String(erro || "Falha de comunicação com a SEFAZ.");
+
+  return {
+    ok: false,
+    transmitido: false,
+    autorizado: false,
+    erroComunicacao: true,
+    tipoFalha: "comunicacao",
+    cStat: "",
+    xMotivo: mensagem,
+    nRec: "",
+    nProt: "",
+    chNFe: "",
+    dhRecbto: "",
+    httpStatus: null,
+    xmlRetorno: "",
+    nfeProc: ""
+  };
+}
+
 async function salvarRetornoSefazLocal(nota, retornoSefaz) {
   const atual = await lerNotaLocal(nota.id) || nota;
+  const agora = new Date().toISOString();
 
   atual.sefaz = {
     transmitido: !!retornoSefaz.transmitido,
     autorizado: !!retornoSefaz.autorizado,
+    erroComunicacao: !!retornoSefaz.erroComunicacao,
+    tipoFalha: retornoSefaz.tipoFalha || "",
     cStat: retornoSefaz.cStat || "",
     xMotivo: retornoSefaz.xMotivo || "",
     nRec: retornoSefaz.nRec || "",
@@ -1778,16 +1802,30 @@ async function salvarRetornoSefazLocal(nota, retornoSefaz) {
     chNFe: retornoSefaz.chNFe || "",
     dhRecbto: retornoSefaz.dhRecbto || "",
     httpStatus: retornoSefaz.httpStatus || "",
-    atualizadoEm: new Date().toISOString()
+    atualizadoEm: agora
   };
+
+  atual.ultima_tentativa_sefaz = agora;
+  atual.tentativas_sefaz = Number(atual.tentativas_sefaz || 0) + 1;
 
   if (retornoSefaz.autorizado) {
     atual.status = "autorizada";
     atual.protocolo = retornoSefaz.nProt || "";
     atual.xml_autorizado = retornoSefaz.nfeProc || "";
-    atual.autorizada_em = new Date().toISOString();
-  } else if (retornoSefaz.transmitido) {
-    atual.status = retornoSefaz.cStat ? "rejeitada" : "pendente";
+    atual.autorizada_em = agora;
+    atual.pendente_reenvio = false;
+  } else if (retornoSefaz.erroComunicacao || !retornoSefaz.transmitido) {
+    atual.status = "pendente_transmissao";
+    atual.pendente_reenvio = true;
+    atual.motivo_pendencia = retornoSefaz.xMotivo || "Falha de comunicação com a SEFAZ.";
+  } else if (retornoSefaz.cStat) {
+    atual.status = "rejeitada";
+    atual.pendente_reenvio = false;
+    atual.motivo_pendencia = retornoSefaz.xMotivo || "";
+  } else {
+    atual.status = "pendente_transmissao";
+    atual.pendente_reenvio = true;
+    atual.motivo_pendencia = retornoSefaz.xMotivo || "Sem confirmação de autorização da SEFAZ.";
   }
 
   atual.resumoFiscal = criarResumoFiscal(atual);
@@ -2165,44 +2203,89 @@ app.get("/sefaz/status", (req, res) => {
 });
 
 app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
+  let nota = null;
+
   try {
-    const nota = await lerNotaCompleta(req.params.id);
+    nota = await lerNotaCompleta(req.params.id);
     if (!nota) {
       return res.status(404).json({ ok: false, error: "Nota não encontrada." });
+    }
+
+    if (nota.sefaz?.autorizado || nota.status === "autorizada") {
+      return res.status(409).json({
+        ok: false,
+        autorizado: true,
+        cStat: nota.sefaz?.cStat || "100",
+        xMotivo: "Esta NFC-e já está autorizada e não deve ser reenviada.",
+        nProt: nota.sefaz?.nProt || nota.protocolo || ""
+      });
     }
 
     const xmlOriginal = gerarXML(nota);
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
 
     if (!assinatura.assinado) {
+      const retornoFalha = {
+        ...criarRetornoFalhaTransmissao(
+          new Error(assinatura.erro || "Falha ao assinar o XML.")
+        ),
+        tipoFalha: "assinatura"
+      };
+      const notaAtualizada = await salvarRetornoSefazLocal(nota, retornoFalha);
+
       return res.status(400).json({
         ok: false,
+        transmitido: false,
+        autorizado: false,
+        status: notaAtualizada.status,
+        pendente_reenvio: true,
         error: "XML não foi assinado. Não é seguro enviar para a SEFAZ.",
         erro_assinatura: assinatura.erro
       });
     }
 
-    const retornoSefaz = await transmitirNfceSefaz(nota, assinatura.xml);
-    await salvarRetornoSefazLocal(nota, retornoSefaz);
+    console.log(`↻ Reenviando NFC-e ${nota.numero} série ${nota.serie} para a SEFAZ...`);
 
-    res.json({
-      ok: retornoSefaz.ok,
-      transmitido: retornoSefaz.transmitido,
-      autorizado: retornoSefaz.autorizado,
-      pendente_habilitacao: !!retornoSefaz.pendente_habilitacao,
-      pendente_configuracao: !!retornoSefaz.pendente_configuracao,
-      cStat: retornoSefaz.cStat,
-      xMotivo: retornoSefaz.xMotivo,
-      nRec: retornoSefaz.nRec,
-      nProt: retornoSefaz.nProt,
-      chNFe: retornoSefaz.chNFe,
-      dhRecbto: retornoSefaz.dhRecbto,
+    const retornoSefaz = await transmitirNfceSefaz(nota, assinatura.xml);
+    const notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
+
+    return res.status(retornoSefaz.autorizado ? 200 : 422).json({
+      ok: !!retornoSefaz.autorizado,
+      transmitido: !!retornoSefaz.transmitido,
+      autorizado: !!retornoSefaz.autorizado,
+      status: notaAtualizada.status,
+      pendente_reenvio: !!notaAtualizada.pendente_reenvio,
+      cStat: retornoSefaz.cStat || "",
+      xMotivo: retornoSefaz.xMotivo || "",
+      nRec: retornoSefaz.nRec || "",
+      nProt: retornoSefaz.nProt || "",
+      chNFe: retornoSefaz.chNFe || "",
+      dhRecbto: retornoSefaz.dhRecbto || "",
       httpStatus: retornoSefaz.httpStatus || null
     });
   } catch (e) {
-    res.status(400).json({
+    const retornoFalha = criarRetornoFalhaTransmissao(e);
+    let notaAtualizada = nota;
+
+    if (nota) {
+      try {
+        notaAtualizada = await salvarRetornoSefazLocal(nota, retornoFalha);
+      } catch (erroSalvar) {
+        console.error("⚠ falha ao salvar pendência de reenvio:", erroSalvar);
+      }
+    }
+
+    console.error("⚠ erro ao reenviar NFC-e para SEFAZ:", e);
+
+    return res.status(503).json({
       ok: false,
-      error: e.message || "Erro ao enviar NFC-e para SEFAZ."
+      transmitido: false,
+      autorizado: false,
+      status: notaAtualizada?.status || "pendente_transmissao",
+      pendente_reenvio: true,
+      cStat: "",
+      xMotivo: retornoFalha.xMotivo,
+      error: retornoFalha.xMotivo
     });
   }
 });
@@ -2307,8 +2390,21 @@ app.post("/nfce/emitir", async (req, res) => {
 
     console.log(`→ Enviando NFC-e ${nota.numero} série ${nota.serie} para a SEFAZ...`);
 
-    const retornoSefaz = await transmitirNfceSefaz(nota, xml);
-    const notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
+    let retornoSefaz;
+    let notaAtualizada;
+
+    try {
+      retornoSefaz = await transmitirNfceSefaz(nota, xml);
+      notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
+    } catch (erroTransmissao) {
+      retornoSefaz = criarRetornoFalhaTransmissao(erroTransmissao);
+      notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
+
+      console.error(
+        `⚠ NFC-e ${nota.numero} salva como pendente_transmissao:`,
+        erroTransmissao
+      );
+    }
 
     console.log(
       `← SEFAZ NFC-e ${nota.numero}: cStat=${retornoSefaz.cStat || "sem cStat"} ` +
@@ -2325,7 +2421,9 @@ app.post("/nfce/emitir", async (req, res) => {
       ok: !!retornoSefaz.autorizado,
       mensagem: retornoSefaz.autorizado
         ? "NFC-e autorizada pela SEFAZ."
-        : "A NFC-e foi processada, mas não foi autorizada.",
+        : retornoSefaz.erroComunicacao
+          ? "Falha de comunicação. A NFC-e foi salva como pendente para reenvio."
+          : "A NFC-e foi processada, mas não foi autorizada.",
       nfce: {
         id: notaAtualizada.id,
         numero: notaAtualizada.numero,
@@ -2350,7 +2448,10 @@ app.post("/nfce/emitir", async (req, res) => {
         dhRecbto: retornoSefaz.dhRecbto || "",
         httpStatus: retornoSefaz.httpStatus || null,
         pendente_habilitacao: !!retornoSefaz.pendente_habilitacao,
-        pendente_configuracao: !!retornoSefaz.pendente_configuracao
+        pendente_configuracao: !!retornoSefaz.pendente_configuracao,
+        pendente_reenvio: !!notaAtualizada.pendente_reenvio,
+        erro_comunicacao: !!retornoSefaz.erroComunicacao,
+        tentativas_sefaz: Number(notaAtualizada.tentativas_sefaz || 0)
       }
     });
   } catch (e) {
