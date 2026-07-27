@@ -483,7 +483,8 @@ function gerarUrlQRCodeNfce(nota) {
     ? NFCE_CONFIG.urlConsulta
     : "https://portalsped.fazenda.mg.gov.br/portalnfce";
 
-  const idCsc = CSC_CONFIG.id || "000000";
+  const idCscNumerico = Number.parseInt(String(CSC_CONFIG.id || "0"), 10);
+  const idCsc = String(Number.isFinite(idCscNumerico) ? idCscNumerico : 0);
   const tokenCsc = CSC_CONFIG.token || "";
 
   const baseQr = `${chave}|${versaoQrCode}|${tpAmb}|${idCsc}`;
@@ -1799,21 +1800,9 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
   const idLote = gerarIdLoteNfce(nota);
   const envelope = montarEnvelopeSoapNfeAutorizacao(xmlAssinado, idLote);
 
-  if (process.env.SEFAZ_DEBUG_XML === "true") {
-    console.log("=== SEFAZ DEBUG: XML SOAP ENVIADO ===");
-    console.log(envelope);
-    console.log("=== FIM XML SOAP ENVIADO ===");
-  }
-
   const resposta = await httpsPostComCertificado(SEFAZ_CONFIG.autorizacaoUrl, envelope, {
     "SOAPAction": ""
   });
-
-  if (process.env.SEFAZ_DEBUG_XML === "true") {
-    console.log("=== SEFAZ DEBUG: XML BRUTO RECEBIDO ===");
-    console.log(resposta.body);
-    console.log("=== FIM XML BRUTO RECEBIDO ===");
-  }
 
   const retorno = extrairRetornoSefaz(resposta.body);
   const nfeProc = retorno.autorizado ? montarNfeProc(xmlAssinado, resposta.body) : "";
