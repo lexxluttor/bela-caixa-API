@@ -1682,7 +1682,17 @@ function httpsPostComCertificado(url, body, headers = {}) {
       req.destroy(new Error("Timeout ao conectar na SEFAZ."));
     });
 
-    req.on("error", reject);
+    req.on("error", function(erro) {
+      console.error("");
+      console.error("==========================================");
+      console.error("=== ERRO NA CONEXÃO COM A SEFAZ =========");
+      console.error("==========================================");
+      console.error(erro?.stack || erro);
+      console.error("==========================================");
+      console.error("");
+      reject(erro);
+    });
+
     req.write(body, "utf8");
     req.end();
   });
@@ -1803,6 +1813,18 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
   const resposta = await httpsPostComCertificado(SEFAZ_CONFIG.autorizacaoUrl, envelope, {
     "SOAPAction": ""
   });
+
+  console.log("");
+  console.log("==========================================");
+  console.log("=== RESPOSTA COMPLETA DA SEFAZ ==========");
+  console.log("==========================================");
+  console.log("Status HTTP:", resposta.statusCode);
+  console.log("Cabeçalhos:", JSON.stringify(resposta.headers || {}, null, 2));
+  console.log(resposta.body || "(resposta sem conteúdo)");
+  console.log("==========================================");
+  console.log("=== FIM RESPOSTA SEFAZ ===================");
+  console.log("==========================================");
+  console.log("");
 
   const retorno = extrairRetornoSefaz(resposta.body);
   const nfeProc = retorno.autorizado ? montarNfeProc(xmlAssinado, resposta.body) : "";
