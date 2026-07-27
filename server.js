@@ -2281,25 +2281,74 @@ app.post("/nfce/emitir", async (req, res) => {
       console.error("⚠ falha ao salvar XML/nota no Apps Script:", e.message);
     }
 
-    res.json({
-      ok: true,
-      mensagem: "NFC-e estruturada com sucesso.",
+    if (!assinatura.assinado) {
+      return res.status(400).json({
+        ok: false,
+        mensagem: "O XML foi gerado, mas não pôde ser assinado. A NFC-e não foi enviada à SEFAZ.",
+        nfce: {
+          id: nota.id,
+          numero: nota.numero,
+          serie: nota.serie,
+          chave: nota.chave,
+          status: nota.status,
+          pdf_url: nota.pdf_url,
+          xml_url: nota.xml_url,
+          numeracao_origem: numeracaoOrigem,
+          xml_salvo_apps_script: xmlSalvoNoAppsScript,
+          xml_assinado: false,
+          erro_assinatura: assinatura.erro,
+          erro_apps_script: erroAppsScript,
+          sefaz_auto_envio: false
+        }
+      });
+    }
+
+    console.log(`→ Enviando NFC-e ${nota.numero} série ${nota.serie} para a SEFAZ...`);
+
+    const retornoSefaz = await transmitirNfceSefaz(nota, xml);
+    const notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
+
+    console.log(
+      `← SEFAZ NFC-e ${nota.numero}: cStat=${retornoSefaz.cStat || "sem cStat"} ` +
+      `xMotivo=${retornoSefaz.xMotivo || "sem motivo"}`
+    );
+
+    const statusHttp = retornoSefaz.autorizado
+      ? 200
+      : retornoSefaz.transmitido
+        ? 422
+        : 503;
+
+    return res.status(statusHttp).json({
+      ok: !!retornoSefaz.autorizado,
+      mensagem: retornoSefaz.autorizado
+        ? "NFC-e autorizada pela SEFAZ."
+        : "A NFC-e foi processada, mas não foi autorizada.",
       nfce: {
-        id: nota.id,
-        numero: nota.numero,
-        serie: nota.serie,
-        chave: nota.chave,
-        status: nota.status,
-        pdf_url: nota.pdf_url,
-        xml_url: nota.xml_url,
+        id: notaAtualizada.id,
+        numero: notaAtualizada.numero,
+        serie: notaAtualizada.serie,
+        chave: notaAtualizada.chave,
+        status: notaAtualizada.status,
+        pdf_url: notaAtualizada.pdf_url,
+        xml_url: notaAtualizada.xml_url,
         numeracao_origem: numeracaoOrigem,
         xml_salvo_apps_script: xmlSalvoNoAppsScript,
-        xml_assinado: assinatura.assinado,
-        erro_assinatura: assinatura.erro,
+        xml_assinado: true,
+        erro_assinatura: null,
         erro_apps_script: erroAppsScript,
-        sefaz_auto_envio: false,
-        sefaz_status_url: `${BASE_URL}/sefaz/status`,
-        sefaz_envio_manual_url: `${BASE_URL}/nfce/${encodeURIComponent(id)}/enviar-sefaz`
+        sefaz_auto_envio: true,
+        transmitido: !!retornoSefaz.transmitido,
+        autorizado: !!retornoSefaz.autorizado,
+        cStat: retornoSefaz.cStat || "",
+        xMotivo: retornoSefaz.xMotivo || "",
+        nRec: retornoSefaz.nRec || "",
+        nProt: retornoSefaz.nProt || "",
+        chNFe: retornoSefaz.chNFe || "",
+        dhRecbto: retornoSefaz.dhRecbto || "",
+        httpStatus: retornoSefaz.httpStatus || null,
+        pendente_habilitacao: !!retornoSefaz.pendente_habilitacao,
+        pendente_configuracao: !!retornoSefaz.pendente_configuracao
       }
     });
   } catch (e) {
