@@ -9,6 +9,7 @@ import https from "https";
 import forge from "node-forge";
 import { SignedXml } from "xml-crypto";
 import { DOMParser } from "xmldom";
+import libxmljs from "libxmljs2";
 
 const app = express();
 app.use(cors());
@@ -21,6 +22,10 @@ const API_BELA_SHEETS = process.env.API_BELA_SHEETS || "";
 
 const DATA_DIR = path.resolve("./storage");
 const NOTAS_DIR = path.join(DATA_DIR, "notas");
+const XSD_NFE_DIR = path.resolve("./schemas/nfe");
+const XSD_NFE_PATH = path.join(XSD_NFE_DIR, "nfe_v4.00.xsd");
+
+let schemaNfeV400 = null;
 
 // ================= CERTIFICADO =================
 
@@ -277,6 +282,78 @@ function esc(s = "") {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function carregarSchemaNfeV400() {
+  if (schemaNfeV400) return schemaNfeV400;
+
+  if (!fs.existsSync(XSD_NFE_PATH)) {
+    throw new Error(`Schema da NF-e não encontrado em ${XSD_NFE_PATH}`);
+  }
+
+  const diretorioAnterior = process.cwd();
+
+  try {
+    // Os XSDs oficiais usam includes relativos. A troca temporária de pasta
+    // acontece apenas na primeira carga e permite resolver esses arquivos.
+    process.chdir(XSD_NFE_DIR);
+    const conteudoXsd = fs.readFileSync("nfe_v4.00.xsd", "utf8");
+    schemaNfeV400 = libxmljs.parseXml(conteudoXsd);
+    return schemaNfeV400;
+  } finally {
+    process.chdir(diretorioAnterior);
+  }
+}
+
+function formatarErroXsd(erro = {}) {
+  return {
+    linha: Number(erro.line || 0),
+    coluna: Number(erro.column || 0),
+    codigo: Number(erro.code || 0),
+    mensagem: String(erro.message || erro.toString() || "Erro XSD desconhecido").trim()
+  };
+}
+
+function validarXmlNfeContraXsd(xml) {
+  try {
+    const schema = carregarSchemaNfeV400();
+    const documento = libxmljs.parseXml(String(xml || ""));
+    const valido = documento.validate(schema);
+    const erros = (documento.validationErrors || []).map(formatarErroXsd);
+
+    if (valido) {
+      console.log("✓ XML NFC-e válido no XSD oficial nfe_v4.00.xsd");
+      return { valido: true, erros: [] };
+    }
+
+    console.error("");
+    console.error("==========================================");
+    console.error("=== ERRO DE VALIDAÇÃO XSD DA NFC-e ======");
+    console.error("==========================================");
+
+    erros.forEach((erro, indice) => {
+      console.error(
+        `${indice + 1}. Linha ${erro.linha || "?"}, coluna ${erro.coluna || "?"}: ${erro.mensagem}`
+      );
+    });
+
+    console.error("==========================================");
+    console.error("");
+
+    return { valido: false, erros };
+  } catch (erro) {
+    const detalhe = {
+      linha: 0,
+      coluna: 0,
+      codigo: 0,
+      mensagem: `Falha ao executar a validação XSD: ${erro?.message || erro}`
+    };
+
+    console.error("=== FALHA NO VALIDADOR XSD ===");
+    console.error(erro?.stack || erro);
+
+    return { valido: false, erros: [detalhe] };
+  }
 }
 
 function textoFiscalXml(v = "") {
@@ -1800,6 +1877,26 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
       pendente_configuracao: true,
       cStat: "",
       xMotivo: "SEFAZ_NFCE_AUTORIZACAO_URL não configurada no Render.",
+      xmlRetorno: "",
+      nfeProc: ""
+    };
+  }
+
+  const validacaoXsd = validarXmlNfeContraXsd(xmlAssinado);
+
+  if (!validacaoXsd.valido) {
+    const primeiroErro = validacaoXsd.erros[0] || {};
+    const local = primeiroErro.linha
+      ? `Linha ${primeiroErro.linha}${primeiroErro.coluna ? `, coluna ${primeiroErro.coluna}` : ""}: `
+      : "";
+
+    return {
+      ok: false,
+      transmitido: false,
+      rejeitado_localmente: true,
+      cStat: "XSD",
+      xMotivo: `${local}${primeiroErro.mensagem || "XML inválido no schema oficial."}`,
+      errosXsd: validacaoXsd.erros,
       xmlRetorno: "",
       nfeProc: ""
     };
