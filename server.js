@@ -1789,9 +1789,21 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
   const idLote = gerarIdLoteNfce(nota);
   const envelope = montarEnvelopeSoapNfeAutorizacao(xmlAssinado, idLote);
 
+  if (process.env.SEFAZ_DEBUG_XML === "true") {
+    console.log("=== SEFAZ DEBUG: XML SOAP ENVIADO ===");
+    console.log(envelope);
+    console.log("=== FIM XML SOAP ENVIADO ===");
+  }
+
   const resposta = await httpsPostComCertificado(SEFAZ_CONFIG.autorizacaoUrl, envelope, {
     "SOAPAction": ""
   });
+
+  if (process.env.SEFAZ_DEBUG_XML === "true") {
+    console.log("=== SEFAZ DEBUG: XML BRUTO RECEBIDO ===");
+    console.log(resposta.body);
+    console.log("=== FIM XML BRUTO RECEBIDO ===");
+  }
 
   const retorno = extrairRetornoSefaz(resposta.body);
   const nfeProc = retorno.autorizado ? montarNfeProc(xmlAssinado, resposta.body) : "";
