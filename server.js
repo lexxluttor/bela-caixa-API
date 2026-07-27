@@ -1633,14 +1633,16 @@ function httpsPostComCertificado(url, body, headers = {}) {
 
     const parsed = new URL(url);
 
+    const certFiscal = carregarCertificadoFiscal();
+
     const options = {
       protocol: parsed.protocol,
       hostname: parsed.hostname,
       port: parsed.port || 443,
       path: parsed.pathname + parsed.search,
       method: "POST",
-      pfx: certificado,
-      passphrase: CERT_PASSWORD,
+      key: certFiscal.privateKeyPem,
+      cert: certFiscal.certificatePem,
       rejectUnauthorized: true,
       timeout: SEFAZ_CONFIG.timeoutMs,
       headers: Object.assign({
