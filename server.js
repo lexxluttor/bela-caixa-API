@@ -1760,22 +1760,39 @@ function extrairTagXml(texto, tag) {
 }
 
 function extrairRetornoSefaz(xmlRetorno) {
-  const cStat = extrairTagXml(xmlRetorno, "cStat");
-  const xMotivo = extrairTagXml(xmlRetorno, "xMotivo");
-  const nRec = extrairTagXml(xmlRetorno, "nRec");
-  const nProt = extrairTagXml(xmlRetorno, "nProt");
-  const chNFe = extrairTagXml(xmlRetorno, "chNFe");
-  const dhRecbto = extrairTagXml(xmlRetorno, "dhRecbto");
+  const xml = String(xmlRetorno || "");
+
+  // A resposta pode trazer dois cStat:
+  // - retEnviNFe: 104 (lote processado)
+  // - protNFe/infProt: 100 (NFC-e autorizada)
+  // O status real da nota deve vir de infProt, não do lote.
+  const protMatch = xml.match(/<(?:\w+:)?protNFe\b[\s\S]*?<\/(?:\w+:)?protNFe>/i);
+  const xmlProtocolo = protMatch ? protMatch[0] : "";
+
+  const cStatLote = extrairTagXml(xml, "cStat");
+  const xMotivoLote = extrairTagXml(xml, "xMotivo");
+
+  const cStatProtocolo = xmlProtocolo ? extrairTagXml(xmlProtocolo, "cStat") : "";
+  const xMotivoProtocolo = xmlProtocolo ? extrairTagXml(xmlProtocolo, "xMotivo") : "";
+
+  const cStat = cStatProtocolo || cStatLote;
+  const xMotivo = xMotivoProtocolo || xMotivoLote;
+  const nRec = extrairTagXml(xml, "nRec");
+  const nProt = extrairTagXml(xmlProtocolo || xml, "nProt");
+  const chNFe = extrairTagXml(xmlProtocolo || xml, "chNFe");
+  const dhRecbto = extrairTagXml(xmlProtocolo || xml, "dhRecbto");
 
   return {
     cStat,
     xMotivo,
+    cStatLote,
+    xMotivoLote,
     nRec,
     nProt,
     chNFe,
     dhRecbto,
-    autorizado: cStat === "100",
-    recebido: cStat === "103" || cStat === "104" || !!nRec
+    autorizado: cStatProtocolo === "100" || cStat === "100",
+    recebido: cStatLote === "103" || cStatLote === "104" || !!nRec
   };
 }
 
@@ -1833,7 +1850,10 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
 
   const retorno = extrairRetornoSefaz(resposta.body);
   console.log("========== RETORNO SEFAZ ==================");
-  console.log(`HTTP: ${resposta.statusCode} | cStat: ${retorno.cStat || "não informado"} | xMotivo: ${retorno.xMotivo || "não informado"}`);
+  console.log(`HTTP: ${resposta.statusCode} | cStat nota: ${retorno.cStat || "não informado"} | xMotivo nota: ${retorno.xMotivo || "não informado"}`);
+  if (retorno.cStatLote) {
+    console.log(`Lote SEFAZ: cStat=${retorno.cStatLote} | xMotivo=${retorno.xMotivoLote || "não informado"}`);
+  }
   console.log(`Resposta bytes: ${Buffer.byteLength(String(resposta.body || ""), "utf8")} | SHA-256: ${hashSha256Texto(resposta.body)}`);
   console.log("===========================================");
   const nfeProc = retorno.autorizado ? montarNfeProc(xmlAssinado, resposta.body) : "";
