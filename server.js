@@ -569,8 +569,12 @@ function normalizarIdCsc(valor) {
 
 function gerarUrlQRCodeNfce(nota) {
   const chave = somenteDigitos(nota.chaveAcesso || nota.chave || "");
-  const versaoQrCode = "2";
-  const tpAmb = (typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.tpAmb) ? NFCE_CONFIG.tpAmb : "2";
+  const versaoQrCode = "3";
+  const tpAmb = String(
+    (typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.tpAmb)
+      ? NFCE_CONFIG.tpAmb
+      : "2"
+  );
   const urlConsulta = (typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.urlConsulta)
     ? String(NFCE_CONFIG.urlConsulta).replace(/\/$/, "")
     : "https://portalsped.fazenda.mg.gov.br/portalnfce";
@@ -579,18 +583,17 @@ function gerarUrlQRCodeNfce(nota) {
     throw new Error(`Chave de acesso inválida para QR Code: esperado 44 dígitos, recebido ${chave.length}.`);
   }
 
-  const idCsc = normalizarIdCsc(CSC_CONFIG.id);
-  const tokenCsc = String(CSC_CONFIG.token || "").trim();
-
-  if (!idCsc || !tokenCsc) {
-    throw new Error("CSC_ID e CSC_TOKEN precisam estar configurados para gerar o QR Code da NFC-e.");
+  if (!/^[12]$/.test(tpAmb)) {
+    throw new Error(`tpAmb inválido para QR Code: ${tpAmb}. Esperado 1 ou 2.`);
   }
 
-  const baseQr = `${chave}|${versaoQrCode}|${tpAmb}|${idCsc}`;
-  const hash = sha1Hex(baseQr + tokenCsc);
+  // QR Code 3.0 em emissão normal/online:
+  // chave de acesso | versão 3 | ambiente.
+  // CSC e hash SHA-1 pertencem ao leiaute 2.0 e não entram nesta URL.
+  const parametros = `${chave}|${versaoQrCode}|${tpAmb}`;
 
-  console.log(`✔ QR Code NFC-e preparado | CSC_ID: ${idCsc} | hash: ${hash.length} caracteres maiúsculos`);
-  return `${urlConsulta}/sistema/qrcode.xhtml?p=${baseQr}|${hash}`;
+  console.log(`✔ QR Code NFC-e v3 preparado | ambiente: ${tpAmb} | CSC não utilizado`);
+  return `${urlConsulta}/sistema/qrcode.xhtml?p=${parametros}`;
 }
 
 function gerarImagemQRCodeUrl(conteudo) {
@@ -2413,15 +2416,6 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
     }
 
     const xmlOriginal = gerarXML(nota);
-    const validacaoXsd = validarXmlNfeContraXsd(xmlOriginal);
-    if (!validacaoXsd.valido) {
-      return res.status(400).json({
-        ok: false,
-        error: "XML inválido no schema XSD. A NFC-e não foi enviada à SEFAZ.",
-        erros_xsd: validacaoXsd.erros,
-        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : ""
-      });
-    }
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
 
     if (assinatura.assinado) {
@@ -2437,6 +2431,16 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
         ok: false,
         error: "XML não foi assinado. Não é seguro enviar para a SEFAZ.",
         erro_assinatura: assinatura.erro
+      });
+    }
+
+    const validacaoXsd = validarXmlNfeContraXsd(assinatura.xml);
+    if (!validacaoXsd.valido) {
+      return res.status(400).json({
+        ok: false,
+        error: "XML assinado inválido no schema XSD. A NFC-e não foi enviada à SEFAZ.",
+        erros_xsd: validacaoXsd.erros,
+        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : ""
       });
     }
 
@@ -2521,19 +2525,6 @@ app.post("/nfce/emitir", async (req, res) => {
     nota.xml_url = `${BASE_URL}/nfce/${encodeURIComponent(id)}/xml`;
 
     const xmlOriginal = gerarXML(nota);
-    const validacaoXsd = validarXmlNfeContraXsd(xmlOriginal);
-    if (!validacaoXsd.valido) {
-      nota.status = "rejeitada_schema_local";
-      nota.erro_xsd = validacaoXsd.erros;
-      await salvarNota(nota);
-      return res.status(400).json({
-        ok: false,
-        mensagem: "O XML não passou na validação XSD e não foi enviado à SEFAZ.",
-        erros_xsd: validacaoXsd.erros,
-        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : "",
-        nfce: { id: nota.id, numero: nota.numero, serie: nota.serie, chave: nota.chave, status: nota.status }
-      });
-    }
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
     const xml = assinatura.xml;
 
@@ -2581,6 +2572,20 @@ app.post("/nfce/emitir", async (req, res) => {
           erro_apps_script: erroAppsScript,
           sefaz_auto_envio: false
         }
+      });
+    }
+
+    const validacaoXsd = validarXmlNfeContraXsd(xml);
+    if (!validacaoXsd.valido) {
+      nota.status = "rejeitada_schema_local";
+      nota.erro_xsd = validacaoXsd.erros;
+      await salvarNota(nota);
+      return res.status(400).json({
+        ok: false,
+        mensagem: "O XML assinado não passou na validação XSD e não foi enviado à SEFAZ.",
+        erros_xsd: validacaoXsd.erros,
+        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : "",
+        nfce: { id: nota.id, numero: nota.numero, serie: nota.serie, chave: nota.chave, status: nota.status }
       });
     }
 
