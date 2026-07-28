@@ -12,7 +12,7 @@ import { DOMParser } from "xmldom";
 import libxmljs from "libxmljs2";
 
 const app = express();
-console.log("🔬 Assinador NFC-e: cirurgia C14N-NFe v1");
+console.log("🔬 Assinador NFC-e: cirurgia C14N-NFe v2");
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
@@ -608,7 +608,7 @@ function assinarXmlNFe(xml) {
   const cert = carregarCertificadoFiscal();
   const id = obterIdInfNFe(xml);
 
-  const C14N_NFE = C14N_NFE;
+  const C14N_NFE = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
   const NFE_NS = "http://www.portalfiscal.inf.br/nfe";
 
   const sig = new SignedXml({
