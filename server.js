@@ -12,6 +12,7 @@ import { DOMParser } from "xmldom";
 import libxmljs from "libxmljs2";
 
 const app = express();
+console.log("🔬 Assinador NFC-e: cirurgia C14N-NFe v1");
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
@@ -607,12 +608,46 @@ function assinarXmlNFe(xml) {
   const cert = carregarCertificadoFiscal();
   const id = obterIdInfNFe(xml);
 
+  const C14N_NFE = C14N_NFE;
+  const NFE_NS = "http://www.portalfiscal.inf.br/nfe";
+
   const sig = new SignedXml({
     privateKey: cert.privateKeyPem,
     publicCert: cert.certificatePem,
-    canonicalizationAlgorithm: "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+    canonicalizationAlgorithm: C14N_NFE,
     signatureAlgorithm: "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
   });
+
+  // Corrige somente o contexto de namespace usado pela C14N da NFC-e.
+  const C14nOriginal = sig.CanonicalizationAlgorithms[C14N_NFE];
+
+  if (!C14nOriginal) {
+    throw new Error("Implementação C14N 1.0 não encontrada no xml-crypto.");
+  }
+
+  sig.CanonicalizationAlgorithms[C14N_NFE] = class C14nNFe extends C14nOriginal {
+    process(node, options = {}) {
+      const recebidos = Array.isArray(options.ancestorNamespaces)
+        ? options.ancestorNamespaces
+        : [];
+
+      const ancestorNamespaces = recebidos.filter((ns) => {
+        const prefixo = String(ns?.prefix ?? ns?.localName ?? "");
+        return prefixo !== "";
+      });
+
+      ancestorNamespaces.unshift({
+        prefix: "",
+        localName: "",
+        namespaceURI: NFE_NS
+      });
+
+      return super.process(node, {
+        ...options,
+        ancestorNamespaces
+      });
+    }
+  };
 
   sig.addReference({
     xpath: "//*[local-name(.)='infNFe' and namespace-uri(.)='http://www.portalfiscal.inf.br/nfe']",
