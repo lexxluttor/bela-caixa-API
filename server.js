@@ -1008,6 +1008,18 @@ function resolverFiscalProdutoCompleto(item = {}) {
 
 // ================= FORMA DE PAGAMENTO FISCAL =================
 
+function gerarDetalhePagamentoFiscal(nota = {}) {
+  const tPag = mapearFormaPagamentoFiscal(nota.pagamento?.tipo);
+  const vPag = dinheiro(nota.pagamento?.valor || nota.total);
+  const ehCartao = tPag === "03" || tPag === "04";
+
+  const grupoCartao = ehCartao
+    ? `<card><tpIntegra>2</tpIntegra></card>`
+    : "";
+
+  return `<detPag><indPag>0</indPag><tPag>${tPag}</tPag><vPag>${vPag}</vPag>${grupoCartao}</detPag>`;
+}
+
 function mapearFormaPagamentoFiscal(tipo = "") {
   const t = String(tipo || "")
     .normalize("NFD")
@@ -1347,10 +1359,7 @@ ${itensXml}
       <modFrete>9</modFrete>
     </transp>
     <pag>
-      <detPag>
-        <tPag>${mapearFormaPagamentoFiscal(nota.pagamento?.tipo)}</tPag>
-        <vPag>${dinheiro(nota.pagamento?.valor || nota.total)}</vPag>
-      </detPag>
+      ${gerarDetalhePagamentoFiscal(nota)}
     </pag>
     <infAdic>
       <infCpl>DOCUMENTO EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL. ${textoHomologacao()}.</infCpl>
