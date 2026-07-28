@@ -610,7 +610,7 @@ function canonicalizarXmlC14n10(noXml) {
     try {
       const fabrica = CanonicalisationFactory();
       const canonicalizador = fabrica.createCanonicaliser(
-        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+        "http://www.w3.org/2001/10/xml-exc-c14n#"
       );
 
       canonicalizador.canonicalise(noXml, (erro, resultado) => {
@@ -637,7 +637,7 @@ async function assinarXmlNFe(xml) {
   const cert = carregarCertificadoFiscal();
   const id = obterIdInfNFe(xml);
   const DS_NS = "http://www.w3.org/2000/09/xmldsig#";
-  const C14N = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
+  const C14N = "http://www.w3.org/2001/10/xml-exc-c14n#";
   const RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
   const SHA1 = "http://www.w3.org/2000/09/xmldsig#sha1";
 
