@@ -12,7 +12,7 @@ import { DOMParser } from "xmldom";
 import libxmljs from "libxmljs2";
 
 const app = express();
-console.log("🧬 Assinador NFC-e: C14N 1.0 inclusivo local auditado v4");
+console.log("🧬 Assinador NFC-e: XMLDSig nativo xml-crypto auditado v5");
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
@@ -604,155 +604,9 @@ function obterIdInfNFe(xml) {
   return id;
 }
 
-// Canonical XML 1.0 inclusivo, sem comentários.
-// Implementação local para atender ao algoritmo fixo exigido pelo XSD da NF-e/NFC-e.
-function escaparTextoC14n(valor = "") {
-  return String(valor)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\r/g, "&#xD;");
-}
-
-function escaparAtributoC14n(valor = "") {
-  return String(valor)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/"/g, "&quot;")
-    .replace(/\t/g, "&#x9;")
-    .replace(/\n/g, "&#xA;")
-    .replace(/\r/g, "&#xD;");
-}
-
-function prefixoNamespaceAtributo(atributo) {
-  const nome = String(atributo?.nodeName || "");
-  if (nome === "xmlns") return "";
-  if (nome.startsWith("xmlns:")) return nome.slice(6);
-  return null;
-}
-
-function coletarNamespacesHerdados(noXml) {
-  const cadeia = [];
-  let atual = noXml?.parentNode || null;
-
-  while (atual && atual.nodeType === 1) {
-    cadeia.unshift(atual);
-    atual = atual.parentNode;
-  }
-
-  const namespaces = new Map();
-  for (const elemento of cadeia) {
-    const atributos = elemento.attributes || [];
-    for (let i = 0; i < atributos.length; i++) {
-      const atributo = atributos.item(i);
-      const prefixo = prefixoNamespaceAtributo(atributo);
-      if (prefixo !== null) namespaces.set(prefixo, String(atributo.value || ""));
-    }
-  }
-
-  return namespaces;
-}
-
-function canonicalizarElementoC14n10(elemento, namespacesRenderizados = new Map(), raiz = false) {
-  const nomeElemento = String(elemento.nodeName || "");
-  const namespacesDisponiveis = new Map();
-
-  if (raiz) {
-    for (const [prefixo, uri] of coletarNamespacesHerdados(elemento)) {
-      namespacesDisponiveis.set(prefixo, uri);
-    }
-  }
-
-  const atributosComuns = [];
-  const atributos = elemento.attributes || [];
-
-  for (let i = 0; i < atributos.length; i++) {
-    const atributo = atributos.item(i);
-    const prefixoNs = prefixoNamespaceAtributo(atributo);
-
-    if (prefixoNs !== null) {
-      namespacesDisponiveis.set(prefixoNs, String(atributo.value || ""));
-    } else {
-      atributosComuns.push(atributo);
-    }
-  }
-
-  const prefixoElemento = String(elemento.prefix || "");
-  const uriElemento = String(elemento.namespaceURI || "");
-  if (uriElemento) namespacesDisponiveis.set(prefixoElemento, uriElemento);
-
-  for (const atributo of atributosComuns) {
-    const prefixo = String(atributo.prefix || "");
-    const uri = String(atributo.namespaceURI || "");
-    if (prefixo && uri && prefixo !== "xml") namespacesDisponiveis.set(prefixo, uri);
-  }
-
-  if (!uriElemento && !prefixoElemento && namespacesRenderizados.get("") && !namespacesDisponiveis.has("")) {
-    namespacesDisponiveis.set("", "");
-  }
-
-  const declaracoes = [];
-  for (const [prefixo, uri] of namespacesDisponiveis) {
-    if (namespacesRenderizados.get(prefixo) !== uri) {
-      declaracoes.push({ prefixo, uri });
-    }
-  }
-
-  declaracoes.sort((a, b) => a.prefixo.localeCompare(b.prefixo));
-
-  atributosComuns.sort((a, b) => {
-    const uriA = String(a.namespaceURI || "");
-    const uriB = String(b.namespaceURI || "");
-    if (uriA !== uriB) return uriA < uriB ? -1 : 1;
-
-    const nomeA = String(a.localName || a.nodeName || "");
-    const nomeB = String(b.localName || b.nodeName || "");
-    return nomeA < nomeB ? -1 : nomeA > nomeB ? 1 : 0;
-  });
-
-  let saida = `<${nomeElemento}`;
-
-  for (const declaracao of declaracoes) {
-    const nome = declaracao.prefixo ? `xmlns:${declaracao.prefixo}` : "xmlns";
-    saida += ` ${nome}="${escaparAtributoC14n(declaracao.uri)}"`;
-  }
-
-  for (const atributo of atributosComuns) {
-    saida += ` ${atributo.nodeName}="${escaparAtributoC14n(atributo.value)}"`;
-  }
-
-  saida += ">";
-
-  const proximosNamespaces = new Map(namespacesRenderizados);
-  for (const declaracao of declaracoes) {
-    proximosNamespaces.set(declaracao.prefixo, declaracao.uri);
-  }
-
-  const filhos = elemento.childNodes || [];
-  for (let i = 0; i < filhos.length; i++) {
-    const filho = filhos.item(i);
-
-    if (filho.nodeType === 1) {
-      saida += canonicalizarElementoC14n10(filho, proximosNamespaces, false);
-    } else if (filho.nodeType === 3 || filho.nodeType === 4) {
-      saida += escaparTextoC14n(filho.data || filho.nodeValue || "");
-    } else if (filho.nodeType === 7) {
-      saida += `<?${filho.target}${filho.data ? ` ${filho.data}` : ""}?>`;
-    }
-    // Comentários são omitidos no algoritmo exigido pela NF-e.
-  }
-
-  saida += `</${nomeElemento}>`;
-  return saida;
-}
-
-function canonicalizarXmlC14n10(noXml) {
-  if (!noXml || noXml.nodeType !== 1) {
-    throw new Error("C14N 1.0 requer um elemento XML válido.");
-  }
-
-  return canonicalizarElementoC14n10(noXml, new Map(), true);
-}
+// A assinatura da NFC-e usa o Canonical XML 1.0 fornecido pelo xml-crypto.
+// Isso evita diferenças de namespace entre o SignedInfo criado e o SignedInfo
+// efetivamente inserido no documento final.
 
 function localizarElementoPorNomeLocal(doc, nome) {
   const todos = doc.getElementsByTagName("*");
@@ -767,63 +621,89 @@ function localizarElementoPorNomeLocal(doc, nome) {
 async function assinarXmlNFe(xml) {
   const cert = carregarCertificadoFiscal();
   const id = obterIdInfNFe(xml);
-  const DS_NS = "http://www.w3.org/2000/09/xmldsig#";
+
   const C14N = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
   const RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
   const SHA1 = "http://www.w3.org/2000/09/xmldsig#sha1";
+  const ENVELOPED = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
 
-  const docNfe = new DOMParser().parseFromString(xml, "text/xml");
-  const infNFe = localizarElementoPorNomeLocal(docNfe, "infNFe");
-  if (!infNFe) throw new Error("Tag infNFe não encontrada para assinatura manual.");
+  const doc = new DOMParser().parseFromString(String(xml || ""), "text/xml");
+  const infNFe = localizarElementoPorNomeLocal(doc, "infNFe");
+  const nfe = localizarElementoPorNomeLocal(doc, "NFe");
 
-  const infNFeCanonica = await canonicalizarXmlC14n10(infNFe);
-  const digestValue = crypto.createHash("sha1").update(infNFeCanonica, "utf8").digest("base64");
+  if (!infNFe || !nfe) {
+    throw new Error("XML não contém NFe/infNFe para assinatura.");
+  }
 
-  const signedInfoXml =
-    `<ds:SignedInfo xmlns:ds="${DS_NS}">` +
-      `<ds:CanonicalizationMethod Algorithm="${C14N}"/>` +
-      `<ds:SignatureMethod Algorithm="${RSA_SHA1}"/>` +
-      `<ds:Reference URI="#${id}">` +
-        `<ds:Transforms>` +
-          `<ds:Transform Algorithm="${DS_NS}enveloped-signature"/>` +
-          `<ds:Transform Algorithm="${C14N}"/>` +
-        `</ds:Transforms>` +
-        `<ds:DigestMethod Algorithm="${SHA1}"/>` +
-        `<ds:DigestValue>${digestValue}</ds:DigestValue>` +
-      `</ds:Reference>` +
-    `</ds:SignedInfo>`;
+  if (infNFe.getAttribute("Id") !== id) {
+    throw new Error("O Id localizado na infNFe diverge do Id usado na assinatura.");
+  }
 
-  const docSignedInfo = new DOMParser().parseFromString(`<raiz>${signedInfoXml}</raiz>`, "text/xml");
-  const signedInfo = localizarElementoPorNomeLocal(docSignedInfo, "SignedInfo");
-  if (!signedInfo) throw new Error("SignedInfo não pôde ser criado.");
+  const sig = new SignedXml({
+    privateKey: cert.privateKeyPem,
+    publicCert: cert.certificatePem,
+    canonicalizationAlgorithm: C14N,
+    signatureAlgorithm: RSA_SHA1
+  });
 
-  const signedInfoCanonico = await canonicalizarXmlC14n10(signedInfo);
-  const signatureValue = crypto.sign("RSA-SHA1", Buffer.from(signedInfoCanonico, "utf8"), cert.privateKeyPem).toString("base64");
+  sig.addReference({
+    xpath: `//*[local-name(.)='infNFe' and @Id='${id}']`,
+    uri: `#${id}`,
+    transforms: [ENVELOPED, C14N],
+    digestAlgorithm: SHA1
+  });
 
-  const assinaturaXml =
-    `<ds:Signature xmlns:ds="${DS_NS}">` + signedInfoXml +
-      `<ds:SignatureValue>${signatureValue}</ds:SignatureValue>` +
-      `<ds:KeyInfo><ds:X509Data><ds:X509Certificate>${cert.certificateClean}</ds:X509Certificate></ds:X509Data></ds:KeyInfo>` +
-    `</ds:Signature>`;
+  // O X509Certificate precisa ficar dentro de KeyInfo conforme o leiaute da NF-e.
+  sig.keyInfoProvider = {
+    getKeyInfo() {
+      return `<X509Data><X509Certificate>${cert.certificateClean}</X509Certificate></X509Data>`;
+    }
+  };
 
-  const xmlAssinado = String(xml).replace(/<\/NFe>\s*$/i, `${assinaturaXml}</NFe>`);
-  if (xmlAssinado === xml) throw new Error("Não foi possível inserir Signature dentro de NFe.");
+  // Na NFC-e, a assinatura permanece como último filho de NFe, depois de infNFeSupl.
+  sig.computeSignature(String(xml), {
+    location: {
+      reference: "//*[local-name(.)='NFe']",
+      action: "append"
+    },
+    prefix: "ds"
+  });
 
-  const docFinal = new DOMParser().parseFromString(xmlAssinado, "text/xml");
-  const infFinal = localizarElementoPorNomeLocal(docFinal, "infNFe");
-  const signedInfoFinal = localizarElementoPorNomeLocal(docFinal, "SignedInfo");
-  if (!infFinal || !signedInfoFinal) throw new Error("XML assinado não contém infNFe/SignedInfo para auditoria.");
+  const xmlAssinado = sig.getSignedXml();
+  if (!xmlAssinado || !xmlAssinado.includes("SignatureValue")) {
+    throw new Error("xml-crypto não produziu uma assinatura XML completa.");
+  }
 
-  const infFinalCanonica = await canonicalizarXmlC14n10(infFinal);
-  const digestRecalculado = crypto.createHash("sha1").update(infFinalCanonica, "utf8").digest("base64");
-  if (digestRecalculado !== digestValue) throw new Error(`Digest local divergiu após inserir a assinatura: ${digestValue} != ${digestRecalculado}`);
+  // Auditoria local usando o mesmo mecanismo XMLDSig que produziu a assinatura.
+  const docAssinado = new DOMParser().parseFromString(xmlAssinado, "text/xml");
+  const assinatura = localizarElementoPorNomeLocal(docAssinado, "Signature");
+  if (!assinatura) {
+    throw new Error("XML assinado não contém o elemento Signature.");
+  }
 
-  const signedInfoFinalCanonico = await canonicalizarXmlC14n10(signedInfoFinal);
-  const assinaturaValida = crypto.verify("RSA-SHA1", Buffer.from(signedInfoFinalCanonico, "utf8"), cert.certificatePem, Buffer.from(signatureValue, "base64"));
-  if (!assinaturaValida) throw new Error("SignatureValue não passou na verificação local.");
+  const verificador = new SignedXml({
+    publicCert: cert.certificatePem
+  });
+  verificador.loadSignature(assinatura);
 
-  console.log("✓ Assinatura manual auditada localmente");
-  console.log("✓ DigestValue:", digestValue);
+  const assinaturaValida = verificador.checkSignature(xmlAssinado);
+  if (!assinaturaValida) {
+    const detalhes = Array.isArray(verificador.validationErrors)
+      ? verificador.validationErrors.join(" | ")
+      : "sem detalhes adicionais";
+    throw new Error(`Assinatura XMLDSig não passou na verificação local: ${detalhes}`);
+  }
+
+  const referencias = typeof verificador.getSignedReferences === "function"
+    ? verificador.getSignedReferences()
+    : [];
+
+  if (Array.isArray(referencias) && referencias.length && !referencias[0]) {
+    throw new Error("A referência assinada da infNFe não pôde ser recuperada na auditoria local.");
+  }
+
+  console.log("✓ Assinatura XMLDSig gerada e verificada localmente");
+  console.log("✓ Referência assinada:", `#${id}`);
   return xmlAssinado;
 }
 
