@@ -1212,7 +1212,6 @@ ${itensXml}
     </transp>
     <pag>
       <detPag>
-        <indPag>0</indPag>
         <tPag>${mapearFormaPagamentoFiscal(nota.pagamento?.tipo)}</tPag>
         <vPag>${dinheiro(nota.pagamento?.valor || nota.total)}</vPag>
       </detPag>
@@ -1782,22 +1781,29 @@ function extrairRetornoSefaz(xmlRetorno) {
   const chNFe = extrairTagXml(xmlProtocolo || xml, "chNFe");
   const dhRecbto = extrairTagXml(xmlProtocolo || xml, "dhRecbto");
 
+  // Só existe autorização fiscal quando o protocolo individual da nota
+  // retorna cStat 100 e traz número de protocolo. O cStat 104 significa
+  // apenas que o lote foi processado e nunca deve virar status autorizado.
+  const autorizado = cStatProtocolo === "100" && !!nProt;
+
   return {
     cStat,
     xMotivo,
     cStatLote,
     xMotivoLote,
+    cStatProtocolo,
+    xMotivoProtocolo,
     nRec,
     nProt,
     chNFe,
     dhRecbto,
-    autorizado: cStatProtocolo === "100" || cStat === "100",
+    autorizado,
     recebido: cStatLote === "103" || cStatLote === "104" || !!nRec
   };
 }
 
 function montarNfeProc(xmlAssinado, xmlRetorno) {
-  const protMatch = String(xmlRetorno || "").match(/<protNFe[\s\S]*?<\/protNFe>/i);
+  const protMatch = String(xmlRetorno || "").match(/<(?:\w+:)?protNFe\b[\s\S]*?<\/(?:\w+:)?protNFe>/i);
   if (!protMatch) return "";
 
   const nfeSemDecl = String(xmlAssinado || "").replace(/<\?xml[^>]*\?>/i, "").trim();
@@ -1851,6 +1857,7 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
   const retorno = extrairRetornoSefaz(resposta.body);
   console.log("========== RETORNO SEFAZ ==================");
   console.log(`HTTP: ${resposta.statusCode} | cStat nota: ${retorno.cStat || "não informado"} | xMotivo nota: ${retorno.xMotivo || "não informado"}`);
+  console.log(`Autorização confirmada: ${retorno.autorizado ? "SIM" : "NÃO"} | nProt: ${retorno.nProt || "ausente"}`);
   if (retorno.cStatLote) {
     console.log(`Lote SEFAZ: cStat=${retorno.cStatLote} | xMotivo=${retorno.xMotivoLote || "não informado"}`);
   }
