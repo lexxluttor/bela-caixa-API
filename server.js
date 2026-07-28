@@ -621,9 +621,26 @@ function obterIdInfNFe(xml) {
   return id;
 }
 
+function compactarXmlAntesDaAssinatura(xml) {
+  const original = String(xml || "");
+
+  // Remove somente espaços, tabs e quebras de linha existentes ENTRE tags.
+  // Conteúdos de campos, CDATA do QR Code e valores de atributos são preservados.
+  const compacto = original
+    .replace(/>\s+</g, "><")
+    .trim();
+
+  console.log(
+    `✔ XML compactado antes da assinatura | bytes: ${Buffer.byteLength(original, "utf8")} -> ${Buffer.byteLength(compacto, "utf8")}`
+  );
+
+  return compacto;
+}
+
 function assinarXmlNFe(xml) {
   const cert = carregarCertificadoFiscal();
-  const id = obterIdInfNFe(xml);
+  const xmlCompacto = compactarXmlAntesDaAssinatura(xml);
+  const id = obterIdInfNFe(xmlCompacto);
 
   const sig = new SignedXml({
     privateKey: cert.privateKeyPem,
@@ -648,7 +665,7 @@ function assinarXmlNFe(xml) {
     }
   };
 
-  sig.computeSignature(xml, {
+  sig.computeSignature(xmlCompacto, {
     location: {
       reference: "//*[local-name(.)='NFe']",
       action: "append"
