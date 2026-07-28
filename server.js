@@ -553,21 +553,59 @@ function sha1Hex(valor) {
   return crypto.createHash("sha1").update(String(valor), "utf8").digest("hex");
 }
 
+function normalizarIdCsc(valor) {
+  const digitos = somenteDigitos(String(valor || ""));
+
+  if (!digitos) {
+    throw new Error("CSC_ID não configurado. Informe o identificador numérico do CSC no Render.");
+  }
+
+  if (digitos.length > 6) {
+    throw new Error("CSC_ID inválido: o identificador pode ter no máximo 6 dígitos.");
+  }
+
+  // O QR Code exige o identificador do CSC com 6 posições.
+  // Ex.: 1 -> 000001; 12 -> 000012; 000001 -> 000001.
+  return digitos.padStart(6, "0");
+}
+
 function gerarUrlQRCodeNfce(nota) {
-  const chave = nota.chaveAcesso || nota.chave || "";
+  const chave = somenteDigitos(nota.chaveAcesso || nota.chave || "");
   const versaoQrCode = "2";
-  const tpAmb = (typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.tpAmb) ? NFCE_CONFIG.tpAmb : "2";
-  const urlConsulta = (typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.urlConsulta)
-    ? NFCE_CONFIG.urlConsulta
-    : "https://portalsped.fazenda.mg.gov.br/portalnfce";
+  const tpAmb = String((typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.tpAmb) ? NFCE_CONFIG.tpAmb : "2").trim();
+  const urlConsulta = String(
+    (typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.urlConsulta)
+      ? NFCE_CONFIG.urlConsulta
+      : "https://portalsped.fazenda.mg.gov.br/portalnfce"
+  ).trim().replace(/\/+$/, "");
 
-  const idCsc = CSC_CONFIG.id || "000000";
-  const tokenCsc = CSC_CONFIG.token || "";
+  if (!/^\d{44}$/.test(chave)) {
+    throw new Error(`Chave de acesso inválida para o QR Code: esperado 44 dígitos, recebido ${chave.length}.`);
+  }
 
+  if (!/^[12]$/.test(tpAmb)) {
+    throw new Error(`tpAmb inválido para o QR Code: ${tpAmb}.`);
+  }
+
+  const idCsc = normalizarIdCsc(CSC_CONFIG.id);
+  const tokenCsc = String(CSC_CONFIG.token || "").trim();
+
+  if (!tokenCsc) {
+    throw new Error("CSC_TOKEN não configurado. Informe o token do CSC no Render.");
+  }
+
+  // O hash deve ser calculado com o mesmo ID já normalizado com zeros à esquerda.
   const baseQr = `${chave}|${versaoQrCode}|${tpAmb}|${idCsc}`;
-  const hash = tokenCsc ? sha1Hex(baseQr + tokenCsc) : "HOMOLOGACAO_SEM_CSC";
+  const hash = sha1Hex(baseQr + tokenCsc).toLowerCase();
+  const urlQrCode = `${urlConsulta}/sistema/qrcode.xhtml?p=${baseQr}|${hash}`;
 
-  return `${urlConsulta}/sistema/qrcode.xhtml?p=${baseQr}|${hash}`;
+  const padraoQrCode = /^https?:\/\/[^\s]+\?p=\d{44}\|2\|[12]\|\d{6}\|[0-9a-f]{40}$/i;
+  if (!padraoQrCode.test(urlQrCode)) {
+    throw new Error("QR Code gerado fora do padrão esperado da NFC-e.");
+  }
+
+  console.log(`✔ QR Code NFC-e preparado | CSC_ID normalizado: ${idCsc}`);
+  return urlQrCode;
 }
 
 function gerarImagemQRCodeUrl(conteudo) {
@@ -2390,15 +2428,6 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
     }
 
     const xmlOriginal = gerarXML(nota);
-    const validacaoXsd = validarXmlNfeContraXsd(xmlOriginal);
-    if (!validacaoXsd.valido) {
-      return res.status(400).json({
-        ok: false,
-        error: "XML inválido no schema XSD. A NFC-e não foi enviada à SEFAZ.",
-        erros_xsd: validacaoXsd.erros,
-        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : ""
-      });
-    }
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
 
     if (assinatura.assinado) {
@@ -2414,6 +2443,17 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
         ok: false,
         error: "XML não foi assinado. Não é seguro enviar para a SEFAZ.",
         erro_assinatura: assinatura.erro
+      });
+    }
+
+    // Valida o documento final, já com a Signature exigida pelo schema.
+    const validacaoXsd = validarXmlNfeContraXsd(assinatura.xml);
+    if (!validacaoXsd.valido) {
+      return res.status(400).json({
+        ok: false,
+        error: "XML assinado inválido no schema XSD. A NFC-e não foi enviada à SEFAZ.",
+        erros_xsd: validacaoXsd.erros,
+        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : ""
       });
     }
 
@@ -2498,19 +2538,6 @@ app.post("/nfce/emitir", async (req, res) => {
     nota.xml_url = `${BASE_URL}/nfce/${encodeURIComponent(id)}/xml`;
 
     const xmlOriginal = gerarXML(nota);
-    const validacaoXsd = validarXmlNfeContraXsd(xmlOriginal);
-    if (!validacaoXsd.valido) {
-      nota.status = "rejeitada_schema_local";
-      nota.erro_xsd = validacaoXsd.erros;
-      await salvarNota(nota);
-      return res.status(400).json({
-        ok: false,
-        mensagem: "O XML não passou na validação XSD e não foi enviado à SEFAZ.",
-        erros_xsd: validacaoXsd.erros,
-        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : "",
-        nfce: { id: nota.id, numero: nota.numero, serie: nota.serie, chave: nota.chave, status: nota.status }
-      });
-    }
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
     const xml = assinatura.xml;
 
@@ -2524,6 +2551,32 @@ app.post("/nfce/emitir", async (req, res) => {
 
     nota.xml_assinado = assinatura.assinado;
     nota.erro_assinatura = assinatura.erro;
+
+    if (!assinatura.assinado) {
+      nota.status = "rejeitada_assinatura_local";
+      await salvarNota(nota);
+      return res.status(400).json({
+        ok: false,
+        mensagem: "O XML não foi assinado e não foi enviado à SEFAZ.",
+        erro_assinatura: assinatura.erro,
+        nfce: { id: nota.id, numero: nota.numero, serie: nota.serie, chave: nota.chave, status: nota.status }
+      });
+    }
+
+    // O schema exige a Signature; por isso a validação ocorre sobre o XML final assinado.
+    const validacaoXsd = validarXmlNfeContraXsd(xml);
+    if (!validacaoXsd.valido) {
+      nota.status = "rejeitada_schema_local";
+      nota.erro_xsd = validacaoXsd.erros;
+      await salvarNota(nota);
+      return res.status(400).json({
+        ok: false,
+        mensagem: "O XML assinado não passou na validação XSD e não foi enviado à SEFAZ.",
+        erros_xsd: validacaoXsd.erros,
+        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : "",
+        nfce: { id: nota.id, numero: nota.numero, serie: nota.serie, chave: nota.chave, status: nota.status }
+      });
+    }
 
     await salvarNota(nota);
 
