@@ -603,7 +603,7 @@ function gerarUrlQRCodeNfce(nota) {
   // chave de acesso | versão 3 | ambiente.
   const parametros = `${chave}|${versaoQrCode}|${tpAmb}`;
 
-  console.log(`✔ QR Code NFC-e v3 preparado | ambiente: ${tpAmb} | endpoint MG oficial`);
+  console.log(`✔ QR Code NFC-e v3 preparado | ambiente ${tpAmb}.`);
   return `${urlQrCode}?p=${parametros}`;
 }
 
@@ -641,9 +641,7 @@ function compactarXmlAntesDaAssinatura(xml) {
     .replace(/>\s+</g, "><")
     .trim();
 
-  console.log(
-    `✔ XML compactado antes da assinatura | bytes: ${Buffer.byteLength(original, "utf8")} -> ${Buffer.byteLength(compacto, "utf8")}`
-  );
+  console.log("✔ XML preparado para assinatura.");
 
   return compacto;
 }
@@ -703,68 +701,7 @@ function tentarAssinarXmlNFe(xml) {
   }
 }
 
-// ================= DIAGNÓSTICO NÃO INTRUSIVO XML/SEFAZ =================
-// Apenas calcula hashes e lê metadados da assinatura.
-// Não altera o XML, a assinatura, o SOAP nem bloqueia o envio.
-
-function hashSha256Texto(valor) {
-  return crypto.createHash("sha256").update(String(valor || ""), "utf8").digest("hex");
-}
-
-function extrairPrimeiroConteudoXml(xml, nomeTag) {
-  const re = new RegExp(`<(?:(?:\\w+):)?${nomeTag}[^>]*>([\\s\\S]*?)<\/(?:(?:\\w+):)?${nomeTag}>`, "i");
-  const achado = String(xml || "").match(re);
-  return achado ? achado[1].trim() : "";
-}
-
-function extrairAtributoPrimeiraTag(xml, nomeTag, atributo) {
-  const re = new RegExp(`<(?:(?:\\w+):)?${nomeTag}\\b[^>]*\\b${atributo}=["']([^"']+)["']`, "i");
-  const achado = String(xml || "").match(re);
-  return achado ? achado[1] : "";
-}
-
-function diagnosticarXmlAssinado(xmlOriginal, xmlAssinado, contexto = {}) {
-  try {
-    const original = String(xmlOriginal || "");
-    const assinado = String(xmlAssinado || "");
-    const digestValue = extrairPrimeiroConteudoXml(assinado, "DigestValue");
-    const signatureValue = extrairPrimeiroConteudoXml(assinado, "SignatureValue");
-    const referencia = extrairAtributoPrimeiraTag(assinado, "Reference", "URI");
-    const idInfNFe = extrairAtributoPrimeiraTag(assinado, "infNFe", "Id");
-
-    console.log("========== DIAGNÓSTICO XML/SEFAZ ==========");
-    console.log(`NFC-e: ${contexto.numero || "?"} | série: ${contexto.serie || "?"} | chave: ${contexto.chave || "?"}`);
-    console.log(`XML original bytes: ${Buffer.byteLength(original, "utf8")} | SHA-256: ${hashSha256Texto(original)}`);
-    console.log(`XML assinado bytes: ${Buffer.byteLength(assinado, "utf8")} | SHA-256: ${hashSha256Texto(assinado)}`);
-    console.log(`infNFe Id: ${idInfNFe || "não encontrado"}`);
-    console.log(`Reference URI: ${referencia || "não encontrada"}`);
-    console.log(`Referência aponta para infNFe: ${referencia === `#${idInfNFe}` ? "SIM" : "NÃO"}`);
-    console.log(`DigestValue presente: ${digestValue ? "SIM" : "NÃO"} | tamanho: ${digestValue.length}`);
-    console.log(`SignatureValue presente: ${signatureValue ? "SIM" : "NÃO"} | tamanho: ${signatureValue.length}`);
-    console.log("Algoritmos esperados no código: C14N 1.0 inclusivo | RSA-SHA1 | SHA1");
-    console.log("===========================================");
-  } catch (e) {
-    console.warn("⚠ diagnóstico XML falhou sem interromper o envio:", e.message);
-  }
-}
-
-function diagnosticarEnvelopeSoap(xmlAssinado, envelope, contexto = {}) {
-  try {
-    const xmlNormalizado = String(xmlAssinado || "").replace(/<\?xml[^>]*\?>/i, "").trim();
-    const envelopeTexto = String(envelope || "");
-    const preservado = envelopeTexto.includes(xmlNormalizado);
-
-    console.log("========== DIAGNÓSTICO SOAP ===============");
-    console.log(`NFC-e: ${contexto.numero || "?"} | idLote: ${contexto.idLote || "?"}`);
-    console.log(`XML inserido bytes: ${Buffer.byteLength(xmlNormalizado, "utf8")} | SHA-256: ${hashSha256Texto(xmlNormalizado)}`);
-    console.log(`Envelope bytes: ${Buffer.byteLength(envelopeTexto, "utf8")} | SHA-256: ${hashSha256Texto(envelopeTexto)}`);
-    console.log(`XML assinado está preservado literalmente dentro do SOAP: ${preservado ? "SIM" : "NÃO"}`);
-    console.log("===========================================");
-  } catch (e) {
-    console.warn("⚠ diagnóstico SOAP falhou sem interromper o envio:", e.message);
-  }
-}
-
+// ================= UTILITÁRIOS =================
 
 function normalizarMes(ano, mes) {
   const a = Number(ano);
@@ -1858,12 +1795,7 @@ function httpsPostComCertificado(url, body, headers = {}) {
 
     const parsed = new URL(url);
 
-    console.log("========== DIAGNÓSTICO TLS/SEFAZ ===========");
-    console.log("Credencial HTTPS: chave privada PEM + certificado PEM");
-    console.log("Chave PEM presente:", credenciaisTls.privateKeyPem ? "SIM" : "NÃO");
-    console.log("Certificado PEM presente:", credenciaisTls.certificatePem ? "SIM" : "NÃO");
-    console.log("Destino TLS:", parsed.hostname + ":" + (parsed.port || 443));
-    console.log("=============================================");
+    console.log(`[SEFAZ] Conectando a ${parsed.hostname}:${parsed.port || 443} com certificado A1.`);
 
     const options = {
       protocol: parsed.protocol,
@@ -2001,24 +1933,14 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
   const idLote = gerarIdLoteNfce(nota);
   const envelope = montarEnvelopeSoapNfeAutorizacao(xmlAssinado, idLote);
 
-  diagnosticarEnvelopeSoap(xmlAssinado, envelope, {
-    numero: nota?.numero,
-    idLote
-  });
-
   const resposta = await httpsPostComCertificado(SEFAZ_CONFIG.autorizacaoUrl, envelope, {
     "SOAPAction": ""
   });
 
   const retorno = extrairRetornoSefaz(resposta.body);
-  console.log("========== RETORNO SEFAZ ==================");
-  console.log(`HTTP: ${resposta.statusCode} | cStat nota: ${retorno.cStat || "não informado"} | xMotivo nota: ${retorno.xMotivo || "não informado"}`);
-  console.log(`Autorização confirmada: ${retorno.autorizado ? "SIM" : "NÃO"} | nProt: ${retorno.nProt || "ausente"}`);
-  if (retorno.cStatLote) {
-    console.log(`Lote SEFAZ: cStat=${retorno.cStatLote} | xMotivo=${retorno.xMotivoLote || "não informado"}`);
-  }
-  console.log(`Resposta bytes: ${Buffer.byteLength(String(resposta.body || ""), "utf8")} | SHA-256: ${hashSha256Texto(resposta.body)}`);
-  console.log("===========================================");
+  console.log(
+    `[SEFAZ] NFC-e ${nota.numero}: HTTP ${resposta.statusCode} | cStat ${retorno.cStat || "?"} | ${retorno.xMotivo || "sem motivo"}${retorno.nProt ? ` | protocolo ${retorno.nProt}` : ""}`
+  );
   const nfeProc = retorno.autorizado ? montarNfeProc(xmlAssinado, resposta.body) : "";
 
   return {
@@ -2460,14 +2382,6 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
     const xmlOriginal = gerarXML(nota);
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
 
-    if (assinatura.assinado) {
-      diagnosticarXmlAssinado(xmlOriginal, assinatura.xml, {
-        numero: nota.numero,
-        serie: nota.serie,
-        chave: nota.chave || nota.chaveAcesso
-      });
-    }
-
     if (!assinatura.assinado) {
       return res.status(400).json({
         ok: false,
@@ -2569,14 +2483,6 @@ app.post("/nfce/emitir", async (req, res) => {
     const xmlOriginal = gerarXML(nota);
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
     const xml = assinatura.xml;
-
-    if (assinatura.assinado) {
-      diagnosticarXmlAssinado(xmlOriginal, xml, {
-        numero: nota.numero,
-        serie: nota.serie,
-        chave: nota.chave || nota.chaveAcesso
-      });
-    }
 
     nota.xml_assinado = assinatura.assinado;
     nota.erro_assinatura = assinatura.erro;
@@ -2909,6 +2815,7 @@ app.get("/nfce/:id/status", async (req, res) => {
 
 app.listen(PORT, () => {
       console.log(`Bela Caixa API rodando na porta ${PORT}`);
+  console.log(`[NFC-e] Ambiente ${NFCE_CONFIG.tpAmb === "1" ? "produção" : "homologação"} | XSD ativo | transmissão ${SEFAZ_CONFIG.habilitada ? "habilitada" : "desabilitada"}.`);
       console.log(`Apps Script configurado: ${API_BELA_SHEETS ? "sim" : "não"}`);
     });
   })
