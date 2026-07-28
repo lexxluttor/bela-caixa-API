@@ -1689,11 +1689,26 @@ function montarEnvelopeSoapNfeAutorizacao(xmlAssinado, idLote) {
 
 function httpsPostComCertificado(url, body, headers = {}) {
   return new Promise(function(resolve, reject) {
-    if (!certificado) {
-      return reject(new Error("Certificado não carregado para conexão SEFAZ."));
+    let credenciaisTls;
+
+    try {
+      // O PFX já foi lido pelo node-forge para assinar o XML. Para a conexão
+      // HTTPS, usamos a chave e o certificado em PEM, evitando que o OpenSSL
+      // do Node tente interpretar novamente o PKCS#12 e gere
+      // "Unsupported PKCS12 PFX data".
+      credenciaisTls = carregarCertificadoFiscal();
+    } catch (err) {
+      return reject(new Error("Não foi possível preparar o certificado para a conexão SEFAZ: " + err.message));
     }
 
     const parsed = new URL(url);
+
+    console.log("========== DIAGNÓSTICO TLS/SEFAZ ===========");
+    console.log("Credencial HTTPS: chave privada PEM + certificado PEM");
+    console.log("Chave PEM presente:", credenciaisTls.privateKeyPem ? "SIM" : "NÃO");
+    console.log("Certificado PEM presente:", credenciaisTls.certificatePem ? "SIM" : "NÃO");
+    console.log("Destino TLS:", parsed.hostname + ":" + (parsed.port || 443));
+    console.log("=============================================");
 
     const options = {
       protocol: parsed.protocol,
@@ -1701,8 +1716,8 @@ function httpsPostComCertificado(url, body, headers = {}) {
       port: parsed.port || 443,
       path: parsed.pathname + parsed.search,
       method: "POST",
-      pfx: certificado,
-      passphrase: CERT_PASSWORD,
+      key: credenciaisTls.privateKeyPem,
+      cert: credenciaisTls.certificatePem,
       rejectUnauthorized: true,
       timeout: SEFAZ_CONFIG.timeoutMs,
       headers: Object.assign({
