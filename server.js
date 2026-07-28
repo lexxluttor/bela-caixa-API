@@ -9,6 +9,7 @@ import https from "https";
 import forge from "node-forge";
 import { SignedXml } from "xml-crypto";
 import { DOMParser } from "xmldom";
+import libxmljs from "libxmljs2";
 
 const app = express();
 app.use(cors());
@@ -21,6 +22,93 @@ const API_BELA_SHEETS = process.env.API_BELA_SHEETS || "";
 
 const DATA_DIR = path.resolve("./storage");
 const NOTAS_DIR = path.join(DATA_DIR, "notas");
+
+// ================= VALIDAÇÃO XSD NFC-e =================
+const SCHEMAS_NFE_DIR = path.resolve("./schemas/nfe");
+let schemaNfeCache = null;
+let schemaNfePathCache = "";
+
+function localizarSchemaNfePrincipal() {
+  if (!fs.existsSync(SCHEMAS_NFE_DIR)) {
+    throw new Error(`Pasta de schemas não encontrada: ${SCHEMAS_NFE_DIR}`);
+  }
+
+  const encontrados = [];
+  const percorrer = (dir) => {
+    for (const nome of fs.readdirSync(dir)) {
+      const caminho = path.join(dir, nome);
+      const stat = fs.statSync(caminho);
+      if (stat.isDirectory()) percorrer(caminho);
+      else if (nome.toLowerCase().endsWith(".xsd")) encontrados.push(caminho);
+    }
+  };
+  percorrer(SCHEMAS_NFE_DIR);
+
+  const preferidos = [
+    "nfe_v4.00.xsd",
+    "nfe_v4.0.xsd",
+    "nfe.xsd"
+  ];
+
+  for (const preferido of preferidos) {
+    const achado = encontrados.find(p => path.basename(p).toLowerCase() === preferido.toLowerCase());
+    if (achado) return achado;
+  }
+
+  const candidato = encontrados.find(p => {
+    const n = path.basename(p).toLowerCase();
+    return n.startsWith("nfe_") && n.includes("4.00") && !n.includes("proc");
+  });
+
+  if (candidato) return candidato;
+  throw new Error(`Schema principal da NFe 4.00 não encontrado em ${SCHEMAS_NFE_DIR}`);
+}
+
+function carregarSchemaNfe() {
+  if (schemaNfeCache) return schemaNfeCache;
+
+  const schemaPath = localizarSchemaNfePrincipal();
+  const schemaXml = fs.readFileSync(schemaPath, "utf8");
+  schemaNfeCache = libxmljs.parseXml(schemaXml, {
+    baseUrl: schemaPath,
+    noblanks: true,
+    nonet: true
+  });
+  schemaNfePathCache = schemaPath;
+  console.log(`✔ schema XSD carregado: ${path.relative(process.cwd(), schemaPath)}`);
+  return schemaNfeCache;
+}
+
+function formatarErrosXsd(erros = []) {
+  return erros.slice(0, 12).map((erro, indice) => {
+    const linha = erro.line || erro.lineNumber || "?";
+    const coluna = erro.column || erro.columnNumber || "?";
+    const mensagem = String(erro.message || erro).replace(/\s+/g, " ").trim();
+    return `${indice + 1}. linha ${linha}, coluna ${coluna}: ${mensagem}`;
+  });
+}
+
+function validarXmlNfeContraXsd(xml) {
+  try {
+    const schema = carregarSchemaNfe();
+    const documento = libxmljs.parseXml(String(xml || ""), { noblanks: true, nonet: true });
+    const valido = documento.validate(schema);
+    const erros = valido ? [] : formatarErrosXsd(documento.validationErrors || []);
+
+    if (valido) {
+      console.log(`✔ XML válido no XSD: ${path.basename(schemaNfePathCache)}`);
+    } else {
+      console.error("❌ XML inválido no XSD:");
+      erros.forEach(e => console.error(`   ${e}`));
+    }
+
+    return { valido, erros, schema: schemaNfePathCache };
+  } catch (erro) {
+    const mensagem = `Falha ao executar validação XSD: ${erro.message}`;
+    console.error(`❌ ${mensagem}`);
+    return { valido: false, erros: [mensagem], schema: schemaNfePathCache };
+  }
+}
 
 // ================= CERTIFICADO =================
 
@@ -2258,6 +2346,25 @@ app.get("/assinatura/debug", (req, res) => {
 });
 
 
+app.get("/xsd/status", (req, res) => {
+  try {
+    carregarSchemaNfe();
+    res.json({
+      ok: true,
+      pasta: SCHEMAS_NFE_DIR,
+      schema_principal: schemaNfePathCache,
+      carregado: true
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      pasta: SCHEMAS_NFE_DIR,
+      carregado: false,
+      error: e.message
+    });
+  }
+});
+
 app.get("/sefaz/status", (req, res) => {
   res.json({
     ok: true,
@@ -2283,6 +2390,15 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
     }
 
     const xmlOriginal = gerarXML(nota);
+    const validacaoXsd = validarXmlNfeContraXsd(xmlOriginal);
+    if (!validacaoXsd.valido) {
+      return res.status(400).json({
+        ok: false,
+        error: "XML inválido no schema XSD. A NFC-e não foi enviada à SEFAZ.",
+        erros_xsd: validacaoXsd.erros,
+        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : ""
+      });
+    }
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
 
     if (assinatura.assinado) {
@@ -2382,6 +2498,19 @@ app.post("/nfce/emitir", async (req, res) => {
     nota.xml_url = `${BASE_URL}/nfce/${encodeURIComponent(id)}/xml`;
 
     const xmlOriginal = gerarXML(nota);
+    const validacaoXsd = validarXmlNfeContraXsd(xmlOriginal);
+    if (!validacaoXsd.valido) {
+      nota.status = "rejeitada_schema_local";
+      nota.erro_xsd = validacaoXsd.erros;
+      await salvarNota(nota);
+      return res.status(400).json({
+        ok: false,
+        mensagem: "O XML não passou na validação XSD e não foi enviado à SEFAZ.",
+        erros_xsd: validacaoXsd.erros,
+        schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : "",
+        nfce: { id: nota.id, numero: nota.numero, serie: nota.serie, chave: nota.chave, status: nota.status }
+      });
+    }
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
     const xml = assinatura.xml;
 
