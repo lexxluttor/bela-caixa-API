@@ -315,7 +315,13 @@ function formatarErroXsd(erro = {}) {
 }
 
 function validarXmlNfeContraXsd(xml) {
+  const diretorioAnterior = process.cwd();
+
   try {
+    // O libxml2 resolve os xs:include/xs:import durante a validação.
+    // Por isso, a pasta dos XSDs precisa continuar ativa até validate() terminar.
+    process.chdir(XSD_NFE_DIR);
+
     const schema = carregarSchemaNfeV400();
     const documento = libxmljs.parseXml(String(xml || ""));
     const valido = documento.validate(schema);
@@ -353,6 +359,8 @@ function validarXmlNfeContraXsd(xml) {
     console.error(erro?.stack || erro);
 
     return { valido: false, erros: [detalhe] };
+  } finally {
+    process.chdir(diretorioAnterior);
   }
 }
 
