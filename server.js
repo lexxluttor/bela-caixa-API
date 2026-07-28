@@ -9,10 +9,8 @@ import https from "https";
 import forge from "node-forge";
 import { SignedXml } from "xml-crypto";
 import { DOMParser } from "xmldom";
-import libxmljs from "libxmljs2";
 
 const app = express();
-console.log("🧬 Assinador NFC-e: C14N 1.0 inclusivo + diagnóstico SEFAZ v4.1");
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
@@ -23,10 +21,6 @@ const API_BELA_SHEETS = process.env.API_BELA_SHEETS || "";
 
 const DATA_DIR = path.resolve("./storage");
 const NOTAS_DIR = path.join(DATA_DIR, "notas");
-const XSD_NFE_DIR = path.resolve("./schemas/nfe");
-const XSD_NFE_PATH = path.join(XSD_NFE_DIR, "nfe_v4.00.xsd");
-
-let schemaNfeV400 = null;
 
 // ================= CERTIFICADO =================
 
@@ -198,7 +192,7 @@ const NFCE_CONFIG = {
 };
 
 // Para NFC-e real, informe no Render:
- // CSC_ID=1
+ // CSC_ID=000001
  // CSC_TOKEN=token_csc_fornecido_pela_sefaz_mg
  // Em homologação, sem CSC configurado, a API gera QR Code técnico de teste.
 const SEFAZ_CONFIG = {
@@ -283,96 +277,6 @@ function esc(s = "") {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-
-function carregarSchemaNfeV400() {
-  if (schemaNfeV400) return schemaNfeV400;
-
-  if (!fs.existsSync(XSD_NFE_PATH)) {
-    throw new Error(`Schema da NF-e não encontrado em ${XSD_NFE_PATH}`);
-  }
-
-  const diretorioAnterior = process.cwd();
-
-  try {
-    // Os XSDs oficiais usam includes relativos. A troca temporária de pasta
-    // acontece apenas na primeira carga e permite resolver esses arquivos.
-    process.chdir(XSD_NFE_DIR);
-    const conteudoXsd = fs.readFileSync("nfe_v4.00.xsd", "utf8");
-    schemaNfeV400 = libxmljs.parseXml(conteudoXsd);
-    return schemaNfeV400;
-  } finally {
-    process.chdir(diretorioAnterior);
-  }
-}
-
-function formatarErroXsd(erro = {}) {
-  return {
-    linha: Number(erro.line || 0),
-    coluna: Number(erro.column || 0),
-    codigo: Number(erro.code || 0),
-    mensagem: String(erro.message || erro.toString() || "Erro XSD desconhecido").trim()
-  };
-}
-
-function validarXmlNfeContraXsd(xml) {
-  const diretorioAnterior = process.cwd();
-
-  try {
-    // O libxml2 resolve os xs:include/xs:import durante a validação.
-    // Por isso, a pasta dos XSDs precisa continuar ativa até validate() terminar.
-    process.chdir(XSD_NFE_DIR);
-
-    const schema = carregarSchemaNfeV400();
-    const documento = libxmljs.parseXml(String(xml || ""));
-    const valido = documento.validate(schema);
-    const erros = (documento.validationErrors || []).map(formatarErroXsd);
-
-    if (valido) {
-      console.log("✓ XML NFC-e válido no XSD oficial nfe_v4.00.xsd");
-      return { valido: true, erros: [] };
-    }
-
-    console.error("");
-    console.error("==========================================");
-    console.error("=== ERRO DE VALIDAÇÃO XSD DA NFC-e ======");
-    console.error("==========================================");
-
-    erros.forEach((erro, indice) => {
-      console.error(
-        `${indice + 1}. Linha ${erro.linha || "?"}, coluna ${erro.coluna || "?"}: ${erro.mensagem}`
-      );
-    });
-
-    console.error("==========================================");
-    console.error("");
-
-    return { valido: false, erros };
-  } catch (erro) {
-    const detalhe = {
-      linha: 0,
-      coluna: 0,
-      codigo: 0,
-      mensagem: `Falha ao executar a validação XSD: ${erro?.message || erro}`
-    };
-
-    console.error("=== FALHA NO VALIDADOR XSD ===");
-    console.error(erro?.stack || erro);
-
-    return { valido: false, erros: [detalhe] };
-  } finally {
-    process.chdir(diretorioAnterior);
-  }
-}
-
-function textoFiscalXml(v = "") {
-  return String(v || "")
-    .replace(/[–—]/g, "-")
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/[^\x20-\xFF]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function toNumber(v, padrao = 0) {
@@ -569,8 +473,7 @@ function gerarUrlQRCodeNfce(nota) {
     ? NFCE_CONFIG.urlConsulta
     : "https://portalsped.fazenda.mg.gov.br/portalnfce";
 
-  const idCscNumerico = Number.parseInt(String(CSC_CONFIG.id || "0"), 10);
-  const idCsc = String(Number.isFinite(idCscNumerico) ? idCscNumerico : 0);
+  const idCsc = CSC_CONFIG.id || "000000";
   const tokenCsc = CSC_CONFIG.token || "";
 
   const baseQr = `${chave}|${versaoQrCode}|${tpAmb}|${idCsc}`;
@@ -604,235 +507,119 @@ function obterIdInfNFe(xml) {
   return id;
 }
 
-// Canonical XML 1.0 inclusivo, sem comentários.
-// Implementação local para atender ao algoritmo fixo exigido pelo XSD da NF-e/NFC-e.
-function escaparTextoC14n(valor = "") {
-  return String(valor)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\r/g, "&#xD;");
-}
-
-function escaparAtributoC14n(valor = "") {
-  return String(valor)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/"/g, "&quot;")
-    .replace(/\t/g, "&#x9;")
-    .replace(/\n/g, "&#xA;")
-    .replace(/\r/g, "&#xD;");
-}
-
-function prefixoNamespaceAtributo(atributo) {
-  const nome = String(atributo?.nodeName || "");
-  if (nome === "xmlns") return "";
-  if (nome.startsWith("xmlns:")) return nome.slice(6);
-  return null;
-}
-
-function coletarNamespacesHerdados(noXml) {
-  const cadeia = [];
-  let atual = noXml?.parentNode || null;
-
-  while (atual && atual.nodeType === 1) {
-    cadeia.unshift(atual);
-    atual = atual.parentNode;
-  }
-
-  const namespaces = new Map();
-  for (const elemento of cadeia) {
-    const atributos = elemento.attributes || [];
-    for (let i = 0; i < atributos.length; i++) {
-      const atributo = atributos.item(i);
-      const prefixo = prefixoNamespaceAtributo(atributo);
-      if (prefixo !== null) namespaces.set(prefixo, String(atributo.value || ""));
-    }
-  }
-
-  return namespaces;
-}
-
-function canonicalizarElementoC14n10(elemento, namespacesRenderizados = new Map(), raiz = false) {
-  const nomeElemento = String(elemento.nodeName || "");
-  const namespacesDisponiveis = new Map();
-
-  if (raiz) {
-    for (const [prefixo, uri] of coletarNamespacesHerdados(elemento)) {
-      namespacesDisponiveis.set(prefixo, uri);
-    }
-  }
-
-  const atributosComuns = [];
-  const atributos = elemento.attributes || [];
-
-  for (let i = 0; i < atributos.length; i++) {
-    const atributo = atributos.item(i);
-    const prefixoNs = prefixoNamespaceAtributo(atributo);
-
-    if (prefixoNs !== null) {
-      namespacesDisponiveis.set(prefixoNs, String(atributo.value || ""));
-    } else {
-      atributosComuns.push(atributo);
-    }
-  }
-
-  const prefixoElemento = String(elemento.prefix || "");
-  const uriElemento = String(elemento.namespaceURI || "");
-  if (uriElemento) namespacesDisponiveis.set(prefixoElemento, uriElemento);
-
-  for (const atributo of atributosComuns) {
-    const prefixo = String(atributo.prefix || "");
-    const uri = String(atributo.namespaceURI || "");
-    if (prefixo && uri && prefixo !== "xml") namespacesDisponiveis.set(prefixo, uri);
-  }
-
-  if (!uriElemento && !prefixoElemento && namespacesRenderizados.get("") && !namespacesDisponiveis.has("")) {
-    namespacesDisponiveis.set("", "");
-  }
-
-  const declaracoes = [];
-  for (const [prefixo, uri] of namespacesDisponiveis) {
-    if (namespacesRenderizados.get(prefixo) !== uri) {
-      declaracoes.push({ prefixo, uri });
-    }
-  }
-
-  declaracoes.sort((a, b) => a.prefixo.localeCompare(b.prefixo));
-
-  atributosComuns.sort((a, b) => {
-    const uriA = String(a.namespaceURI || "");
-    const uriB = String(b.namespaceURI || "");
-    if (uriA !== uriB) return uriA < uriB ? -1 : 1;
-
-    const nomeA = String(a.localName || a.nodeName || "");
-    const nomeB = String(b.localName || b.nodeName || "");
-    return nomeA < nomeB ? -1 : nomeA > nomeB ? 1 : 0;
-  });
-
-  let saida = `<${nomeElemento}`;
-
-  for (const declaracao of declaracoes) {
-    const nome = declaracao.prefixo ? `xmlns:${declaracao.prefixo}` : "xmlns";
-    saida += ` ${nome}="${escaparAtributoC14n(declaracao.uri)}"`;
-  }
-
-  for (const atributo of atributosComuns) {
-    saida += ` ${atributo.nodeName}="${escaparAtributoC14n(atributo.value)}"`;
-  }
-
-  saida += ">";
-
-  const proximosNamespaces = new Map(namespacesRenderizados);
-  for (const declaracao of declaracoes) {
-    proximosNamespaces.set(declaracao.prefixo, declaracao.uri);
-  }
-
-  const filhos = elemento.childNodes || [];
-  for (let i = 0; i < filhos.length; i++) {
-    const filho = filhos.item(i);
-
-    if (filho.nodeType === 1) {
-      saida += canonicalizarElementoC14n10(filho, proximosNamespaces, false);
-    } else if (filho.nodeType === 3 || filho.nodeType === 4) {
-      saida += escaparTextoC14n(filho.data || filho.nodeValue || "");
-    } else if (filho.nodeType === 7) {
-      saida += `<?${filho.target}${filho.data ? ` ${filho.data}` : ""}?>`;
-    }
-    // Comentários são omitidos no algoritmo exigido pela NF-e.
-  }
-
-  saida += `</${nomeElemento}>`;
-  return saida;
-}
-
-function canonicalizarXmlC14n10(noXml) {
-  if (!noXml || noXml.nodeType !== 1) {
-    throw new Error("C14N 1.0 requer um elemento XML válido.");
-  }
-
-  return canonicalizarElementoC14n10(noXml, new Map(), true);
-}
-
-function localizarElementoPorNomeLocal(doc, nome) {
-  const todos = doc.getElementsByTagName("*");
-  for (let i = 0; i < todos.length; i++) {
-    const no = todos[i];
-    const local = no.localName || String(no.nodeName || "").split(":").pop();
-    if (local === nome) return no;
-  }
-  return null;
-}
-
-async function assinarXmlNFe(xml) {
+function assinarXmlNFe(xml) {
   const cert = carregarCertificadoFiscal();
   const id = obterIdInfNFe(xml);
-  const DS_NS = "http://www.w3.org/2000/09/xmldsig#";
-  const C14N = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
-  const RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
-  const SHA1 = "http://www.w3.org/2000/09/xmldsig#sha1";
 
-  const docNfe = new DOMParser().parseFromString(xml, "text/xml");
-  const infNFe = localizarElementoPorNomeLocal(docNfe, "infNFe");
-  if (!infNFe) throw new Error("Tag infNFe não encontrada para assinatura manual.");
+  const sig = new SignedXml({
+    privateKey: cert.privateKeyPem,
+    publicCert: cert.certificatePem,
+    canonicalizationAlgorithm: "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+    signatureAlgorithm: "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
+  });
 
-  const infNFeCanonica = await canonicalizarXmlC14n10(infNFe);
-  const digestValue = crypto.createHash("sha1").update(infNFeCanonica, "utf8").digest("base64");
+  sig.addReference({
+    xpath: "//*[local-name(.)='infNFe']",
+    uri: "#" + id,
+    transforms: [
+      "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+      "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+    ],
+    digestAlgorithm: "http://www.w3.org/2000/09/xmldsig#sha1"
+  });
 
-  const signedInfoXml =
-    `<ds:SignedInfo xmlns:ds="${DS_NS}">` +
-      `<ds:CanonicalizationMethod Algorithm="${C14N}"/>` +
-      `<ds:SignatureMethod Algorithm="${RSA_SHA1}"/>` +
-      `<ds:Reference URI="#${id}">` +
-        `<ds:Transforms>` +
-          `<ds:Transform Algorithm="${DS_NS}enveloped-signature"/>` +
-          `<ds:Transform Algorithm="${C14N}"/>` +
-        `</ds:Transforms>` +
-        `<ds:DigestMethod Algorithm="${SHA1}"/>` +
-        `<ds:DigestValue>${digestValue}</ds:DigestValue>` +
-      `</ds:Reference>` +
-    `</ds:SignedInfo>`;
+  sig.keyInfoProvider = {
+    getKeyInfo() {
+      return `<X509Data><X509Certificate>${cert.certificateClean}</X509Certificate></X509Data>`;
+    }
+  };
 
-  const docSignedInfo = new DOMParser().parseFromString(`<raiz>${signedInfoXml}</raiz>`, "text/xml");
-  const signedInfo = localizarElementoPorNomeLocal(docSignedInfo, "SignedInfo");
-  if (!signedInfo) throw new Error("SignedInfo não pôde ser criado.");
+  sig.computeSignature(xml, {
+    location: {
+      reference: "//*[local-name(.)='NFe']",
+      action: "append"
+    }
+  });
 
-  const signedInfoCanonico = await canonicalizarXmlC14n10(signedInfo);
-  const signatureValue = crypto.sign("RSA-SHA1", Buffer.from(signedInfoCanonico, "utf8"), cert.privateKeyPem).toString("base64");
-
-  const assinaturaXml =
-    `<ds:Signature xmlns:ds="${DS_NS}">` + signedInfoXml +
-      `<ds:SignatureValue>${signatureValue}</ds:SignatureValue>` +
-      `<ds:KeyInfo><ds:X509Data><ds:X509Certificate>${cert.certificateClean}</ds:X509Certificate></ds:X509Data></ds:KeyInfo>` +
-    `</ds:Signature>`;
-
-  const xmlAssinado = String(xml).replace(/<\/NFe>\s*$/i, `${assinaturaXml}</NFe>`);
-  if (xmlAssinado === xml) throw new Error("Não foi possível inserir Signature dentro de NFe.");
-
-  const docFinal = new DOMParser().parseFromString(xmlAssinado, "text/xml");
-  const infFinal = localizarElementoPorNomeLocal(docFinal, "infNFe");
-  const signedInfoFinal = localizarElementoPorNomeLocal(docFinal, "SignedInfo");
-  if (!infFinal || !signedInfoFinal) throw new Error("XML assinado não contém infNFe/SignedInfo para auditoria.");
-
-  const infFinalCanonica = await canonicalizarXmlC14n10(infFinal);
-  const digestRecalculado = crypto.createHash("sha1").update(infFinalCanonica, "utf8").digest("base64");
-  if (digestRecalculado !== digestValue) throw new Error(`Digest local divergiu após inserir a assinatura: ${digestValue} != ${digestRecalculado}`);
-
-  const signedInfoFinalCanonico = await canonicalizarXmlC14n10(signedInfoFinal);
-  const assinaturaValida = crypto.verify("RSA-SHA1", Buffer.from(signedInfoFinalCanonico, "utf8"), cert.certificatePem, Buffer.from(signatureValue, "base64"));
-  if (!assinaturaValida) throw new Error("SignatureValue não passou na verificação local.");
-
-  console.log("✓ Assinatura manual auditada localmente");
-  console.log("✓ DigestValue:", digestValue);
-  return xmlAssinado;
+  return sig.getSignedXml();
 }
 
-async function tentarAssinarXmlNFe(xml) {
+function tentarAssinarXmlNFe(xml) {
   try {
-    return { xml: await assinarXmlNFe(xml), assinado: true, erro: null };
+    return {
+      xml: assinarXmlNFe(xml),
+      assinado: true,
+      erro: null
+    };
   } catch (e) {
     console.error("⚠ falha ao assinar XML:", e.message);
-    return { xml, assinado: false, erro: e.message };
+    return {
+      xml,
+      assinado: false,
+      erro: e.message
+    };
+  }
+}
+
+// ================= DIAGNÓSTICO NÃO INTRUSIVO XML/SEFAZ =================
+// Apenas calcula hashes e lê metadados da assinatura.
+// Não altera o XML, a assinatura, o SOAP nem bloqueia o envio.
+
+function hashSha256Texto(valor) {
+  return crypto.createHash("sha256").update(String(valor || ""), "utf8").digest("hex");
+}
+
+function extrairPrimeiroConteudoXml(xml, nomeTag) {
+  const re = new RegExp(`<(?:(?:\\w+):)?${nomeTag}[^>]*>([\\s\\S]*?)<\/(?:(?:\\w+):)?${nomeTag}>`, "i");
+  const achado = String(xml || "").match(re);
+  return achado ? achado[1].trim() : "";
+}
+
+function extrairAtributoPrimeiraTag(xml, nomeTag, atributo) {
+  const re = new RegExp(`<(?:(?:\\w+):)?${nomeTag}\\b[^>]*\\b${atributo}=["']([^"']+)["']`, "i");
+  const achado = String(xml || "").match(re);
+  return achado ? achado[1] : "";
+}
+
+function diagnosticarXmlAssinado(xmlOriginal, xmlAssinado, contexto = {}) {
+  try {
+    const original = String(xmlOriginal || "");
+    const assinado = String(xmlAssinado || "");
+    const digestValue = extrairPrimeiroConteudoXml(assinado, "DigestValue");
+    const signatureValue = extrairPrimeiroConteudoXml(assinado, "SignatureValue");
+    const referencia = extrairAtributoPrimeiraTag(assinado, "Reference", "URI");
+    const idInfNFe = extrairAtributoPrimeiraTag(assinado, "infNFe", "Id");
+
+    console.log("========== DIAGNÓSTICO XML/SEFAZ ==========");
+    console.log(`NFC-e: ${contexto.numero || "?"} | série: ${contexto.serie || "?"} | chave: ${contexto.chave || "?"}`);
+    console.log(`XML original bytes: ${Buffer.byteLength(original, "utf8")} | SHA-256: ${hashSha256Texto(original)}`);
+    console.log(`XML assinado bytes: ${Buffer.byteLength(assinado, "utf8")} | SHA-256: ${hashSha256Texto(assinado)}`);
+    console.log(`infNFe Id: ${idInfNFe || "não encontrado"}`);
+    console.log(`Reference URI: ${referencia || "não encontrada"}`);
+    console.log(`Referência aponta para infNFe: ${referencia === `#${idInfNFe}` ? "SIM" : "NÃO"}`);
+    console.log(`DigestValue presente: ${digestValue ? "SIM" : "NÃO"} | tamanho: ${digestValue.length}`);
+    console.log(`SignatureValue presente: ${signatureValue ? "SIM" : "NÃO"} | tamanho: ${signatureValue.length}`);
+    console.log("Algoritmos esperados no código: C14N 1.0 inclusivo | RSA-SHA1 | SHA1");
+    console.log("===========================================");
+  } catch (e) {
+    console.warn("⚠ diagnóstico XML falhou sem interromper o envio:", e.message);
+  }
+}
+
+function diagnosticarEnvelopeSoap(xmlAssinado, envelope, contexto = {}) {
+  try {
+    const xmlNormalizado = String(xmlAssinado || "").replace(/<\?xml[^>]*\?>/i, "").trim();
+    const envelopeTexto = String(envelope || "");
+    const preservado = envelopeTexto.includes(xmlNormalizado);
+
+    console.log("========== DIAGNÓSTICO SOAP ===============");
+    console.log(`NFC-e: ${contexto.numero || "?"} | idLote: ${contexto.idLote || "?"}`);
+    console.log(`XML inserido bytes: ${Buffer.byteLength(xmlNormalizado, "utf8")} | SHA-256: ${hashSha256Texto(xmlNormalizado)}`);
+    console.log(`Envelope bytes: ${Buffer.byteLength(envelopeTexto, "utf8")} | SHA-256: ${hashSha256Texto(envelopeTexto)}`);
+    console.log(`XML assinado está preservado literalmente dentro do SOAP: ${preservado ? "SIM" : "NÃO"}`);
+    console.log("===========================================");
+  } catch (e) {
+    console.warn("⚠ diagnóstico SOAP falhou sem interromper o envio:", e.message);
   }
 }
 
@@ -1279,7 +1066,7 @@ function gerarXML(nota) {
   const infNFeId = "NFe" + chave;
   const dhEmi = formatarDhEmi(nota.dataEmissaoIso);
   const totais = calcularTotaisFiscais(nota);
-  const qrCodeUrl = gerarUrlQRCodeNfce(nota);
+  const qrCodeUrl = nota.qrCodeUrl || gerarUrlQRCodeNfce(nota);
 
   const itensXml = (nota.itens || []).map((item, idx) => {
     const cestXml = item.cest ? `
@@ -1300,7 +1087,7 @@ function gerarXML(nota) {
       <prod>
         <cProd>${esc(item.codigo || String(idx + 1))}</cProd>
         <cEAN>${esc(item.ean || "SEM GTIN")}</cEAN>
-        <xProd>${esc(textoFiscalXml(item.descricao))}</xProd>
+        <xProd>${esc(item.descricao)}</xProd>
         <NCM>${esc(item.ncm)}</NCM>${cestXml}
         <CFOP>${esc(item.cfop)}</CFOP>
         <uCom>${esc(item.unidade)}</uCom>
@@ -1354,7 +1141,7 @@ function gerarXML(nota) {
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <NFe xmlns="http://www.portalfiscal.inf.br/nfe">
-  <infNFe xmlns="http://www.portalfiscal.inf.br/nfe" Id="${infNFeId}" versao="4.00">
+  <infNFe Id="${infNFeId}" versao="4.00">
     <ide>
       <cUF>${NFCE_CONFIG.cUF}</cUF>
       <cNF>${esc(nota.cNF)}</cNF>
@@ -1425,6 +1212,7 @@ ${itensXml}
     </transp>
     <pag>
       <detPag>
+        <indPag>0</indPag>
         <tPag>${mapearFormaPagamentoFiscal(nota.pagamento?.tipo)}</tPag>
         <vPag>${dinheiro(nota.pagamento?.valor || nota.total)}</vPag>
       </detPag>
@@ -1869,77 +1657,6 @@ function criarResumoFiscal(nota = {}) {
 }
 
 
-
-// ================= DIAGNÓSTICO DE ASSINATURA / SEFAZ =================
-// Não altera o XML nem o envio. Apenas registra evidências para comparação.
-
-const DIAGNOSTICO_DIR = path.join(DATA_DIR, "diagnostico-sefaz");
-
-function idDiagnosticoNfce(nota = {}) {
-  const chave = somenteDigitos(nota.chaveAcesso || nota.chave || "");
-  if (chave) return chave;
-  const numero = String(nota.numero || "sem-numero").replace(/[^A-Za-z0-9_-]/g, "_");
-  return `${numero}-${Date.now()}`;
-}
-
-function hashSha256Utf8(valor = "") {
-  return crypto.createHash("sha256").update(String(valor), "utf8").digest("hex");
-}
-
-async function salvarArquivoDiagnostico(nota, nome, conteudo) {
-  try {
-    const pasta = path.join(DIAGNOSTICO_DIR, idDiagnosticoNfce(nota));
-    await fsp.mkdir(pasta, { recursive: true });
-    const arquivo = path.join(pasta, nome);
-    await fsp.writeFile(arquivo, String(conteudo ?? ""), "utf8");
-    return arquivo;
-  } catch (erro) {
-    console.error(`⚠ falha ao salvar diagnóstico ${nome}:`, erro?.message || erro);
-    return "";
-  }
-}
-
-function extrairNFeDoEnvelopeSoap(envelope = "") {
-  const match = String(envelope).match(/<(?:\w+:)?NFe\b[\s\S]*?<\/(?:\w+:)?NFe>/i);
-  return match ? match[0] : "";
-}
-
-async function registrarComparacaoXmlSefaz(nota, xmlAssinado, envelope, resposta = null) {
-  const xmlNoSoap = extrairNFeDoEnvelopeSoap(envelope);
-  const hashAssinado = hashSha256Utf8(xmlAssinado);
-  const hashNoSoap = hashSha256Utf8(xmlNoSoap);
-  const xmlIgual = xmlNoSoap === String(xmlAssinado || "").replace(/<\?xml[^>]*\?>/i, "").trim();
-
-  const relatorio = [
-    `Data: ${new Date().toISOString()}`,
-    `NFC-e: ${nota?.numero || ""}`,
-    `Série: ${nota?.serie || ""}`,
-    `Chave: ${nota?.chaveAcesso || nota?.chave || ""}`,
-    `Hash SHA-256 XML assinado: ${hashAssinado}`,
-    `Hash SHA-256 XML dentro do SOAP: ${hashNoSoap}`,
-    `XML dentro do SOAP encontrado: ${xmlNoSoap ? "SIM" : "NÃO"}`,
-    `XML preservado após remover declaração: ${xmlIgual ? "SIM" : "NÃO"}`,
-    resposta ? `HTTP SEFAZ: ${resposta.statusCode || ""}` : "HTTP SEFAZ: ainda não recebido"
-  ].join("\n") + "\n";
-
-  await Promise.all([
-    salvarArquivoDiagnostico(nota, "02-xml-assinado.xml", xmlAssinado),
-    salvarArquivoDiagnostico(nota, "03-xml-extraido-do-soap.xml", xmlNoSoap),
-    salvarArquivoDiagnostico(nota, "04-soap-enviado.xml", envelope),
-    salvarArquivoDiagnostico(nota, "06-relatorio.txt", relatorio),
-    resposta ? salvarArquivoDiagnostico(nota, "05-resposta-sefaz.xml", resposta.body || "") : Promise.resolve("")
-  ]);
-
-  console.log("=== DIAGNÓSTICO XML/SEFAZ ================");
-  console.log("Hash XML assinado:", hashAssinado);
-  console.log("Hash XML no SOAP :", hashNoSoap);
-  console.log("XML preservado   :", xmlIgual ? "SIM" : "NÃO");
-  console.log("Pasta diagnóstico:", path.join(DIAGNOSTICO_DIR, idDiagnosticoNfce(nota)));
-  console.log("==========================================");
-
-  return { xmlNoSoap, hashAssinado, hashNoSoap, xmlIgual };
-}
-
 // ================= SEFAZ / AUTORIZAÇÃO NFC-E =================
 //
 // Camada preparada para transmissão SEFAZ.
@@ -1978,16 +1695,14 @@ function httpsPostComCertificado(url, body, headers = {}) {
 
     const parsed = new URL(url);
 
-    const certFiscal = carregarCertificadoFiscal();
-
     const options = {
       protocol: parsed.protocol,
       hostname: parsed.hostname,
       port: parsed.port || 443,
       path: parsed.pathname + parsed.search,
       method: "POST",
-      key: certFiscal.privateKeyPem,
-      cert: certFiscal.certificatePem,
+      pfx: certificado,
+      passphrase: CERT_PASSWORD,
       rejectUnauthorized: true,
       timeout: SEFAZ_CONFIG.timeoutMs,
       headers: Object.assign({
@@ -2017,17 +1732,7 @@ function httpsPostComCertificado(url, body, headers = {}) {
       req.destroy(new Error("Timeout ao conectar na SEFAZ."));
     });
 
-    req.on("error", function(erro) {
-      console.error("");
-      console.error("==========================================");
-      console.error("=== ERRO NA CONEXÃO COM A SEFAZ =========");
-      console.error("==========================================");
-      console.error(erro?.stack || erro);
-      console.error("==========================================");
-      console.error("");
-      reject(erro);
-    });
-
+    req.on("error", reject);
     req.write(body, "utf8");
     req.end();
   });
@@ -2039,79 +1744,36 @@ function extrairTagXml(texto, tag) {
   return m ? m[1].trim() : "";
 }
 
-function extrairBlocoXml(texto, tag) {
-  const re = new RegExp(
-    "<(?:\\w+:)?" + tag + "\\b[^>]*>[\\s\\S]*?</(?:\\w+:)?" + tag + ">",
-    "i"
-  );
-  const m = String(texto || "").match(re);
-  return m ? m[0] : "";
-}
-
 function extrairRetornoSefaz(xmlRetorno) {
-  const xml = String(xmlRetorno || "");
-
-  // O retorno síncrono pode trazer cStat=104 no lote e, dentro de protNFe,
-  // o resultado real da NFC-e, como 100 (autorizada) ou uma rejeição.
-  const blocoProtNFe = extrairBlocoXml(xml, "protNFe");
-  const fonteProtocolo = blocoProtNFe || "";
-
-  const cStatLote = extrairTagXml(xml, "cStat");
-  const xMotivoLote = extrairTagXml(xml, "xMotivo");
-
-  const cStatProtocolo = fonteProtocolo
-    ? extrairTagXml(fonteProtocolo, "cStat")
-    : "";
-  const xMotivoProtocolo = fonteProtocolo
-    ? extrairTagXml(fonteProtocolo, "xMotivo")
-    : "";
-
-  const cStat = cStatProtocolo || cStatLote;
-  const xMotivo = xMotivoProtocolo || xMotivoLote;
-  const nRec = extrairTagXml(xml, "nRec");
-  const nProt = fonteProtocolo
-    ? extrairTagXml(fonteProtocolo, "nProt")
-    : extrairTagXml(xml, "nProt");
-  const chNFe = fonteProtocolo
-    ? extrairTagXml(fonteProtocolo, "chNFe")
-    : extrairTagXml(xml, "chNFe");
-  const dhRecbto = fonteProtocolo
-    ? extrairTagXml(fonteProtocolo, "dhRecbto")
-    : extrairTagXml(xml, "dhRecbto");
+  const cStat = extrairTagXml(xmlRetorno, "cStat");
+  const xMotivo = extrairTagXml(xmlRetorno, "xMotivo");
+  const nRec = extrairTagXml(xmlRetorno, "nRec");
+  const nProt = extrairTagXml(xmlRetorno, "nProt");
+  const chNFe = extrairTagXml(xmlRetorno, "chNFe");
+  const dhRecbto = extrairTagXml(xmlRetorno, "dhRecbto");
 
   return {
     cStat,
     xMotivo,
-    cStatLote,
-    xMotivoLote,
-    cStatProtocolo,
-    xMotivoProtocolo,
     nRec,
     nProt,
     chNFe,
     dhRecbto,
-    protocoloEncontrado: !!blocoProtNFe,
-    autorizado: cStatProtocolo === "100",
-    recebido:
-      cStatLote === "103" ||
-      cStatLote === "104" ||
-      !!nRec ||
-      !!blocoProtNFe
+    autorizado: cStat === "100",
+    recebido: cStat === "103" || cStat === "104" || !!nRec
   };
 }
 
 function montarNfeProc(xmlAssinado, xmlRetorno) {
-  const protNFe = extrairBlocoXml(xmlRetorno, "protNFe");
-  if (!protNFe) return "";
+  const protMatch = String(xmlRetorno || "").match(/<protNFe[\s\S]*?<\/protNFe>/i);
+  if (!protMatch) return "";
 
-  const nfeSemDecl = String(xmlAssinado || "")
-    .replace(/<\?xml[^>]*\?>/i, "")
-    .trim();
+  const nfeSemDecl = String(xmlAssinado || "").replace(/<\?xml[^>]*\?>/i, "").trim();
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
 ${nfeSemDecl}
-${protNFe}
+${protMatch[0]}
 </nfeProc>`;
 }
 
@@ -2140,52 +1802,25 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
     };
   }
 
-  const validacaoXsd = validarXmlNfeContraXsd(xmlAssinado);
-
-  if (!validacaoXsd.valido) {
-    const primeiroErro = validacaoXsd.erros[0] || {};
-    const local = primeiroErro.linha
-      ? `Linha ${primeiroErro.linha}${primeiroErro.coluna ? `, coluna ${primeiroErro.coluna}` : ""}: `
-      : "";
-
-    return {
-      ok: false,
-      transmitido: false,
-      rejeitado_localmente: true,
-      cStat: "XSD",
-      xMotivo: `${local}${primeiroErro.mensagem || "XML inválido no schema oficial."}`,
-      errosXsd: validacaoXsd.erros,
-      xmlRetorno: "",
-      nfeProc: ""
-    };
-  }
-
   carregarCertificadoFiscal();
 
   const idLote = gerarIdLoteNfce(nota);
   const envelope = montarEnvelopeSoapNfeAutorizacao(xmlAssinado, idLote);
 
-  await registrarComparacaoXmlSefaz(nota, xmlAssinado, envelope);
+  diagnosticarEnvelopeSoap(xmlAssinado, envelope, {
+    numero: nota?.numero,
+    idLote
+  });
 
   const resposta = await httpsPostComCertificado(SEFAZ_CONFIG.autorizacaoUrl, envelope, {
     "SOAPAction": ""
   });
 
-  await registrarComparacaoXmlSefaz(nota, xmlAssinado, envelope, resposta);
-
-  console.log("");
-  console.log("==========================================");
-  console.log("=== RESPOSTA COMPLETA DA SEFAZ ==========");
-  console.log("==========================================");
-  console.log("Status HTTP:", resposta.statusCode);
-  console.log("Cabeçalhos:", JSON.stringify(resposta.headers || {}, null, 2));
-  console.log(resposta.body || "(resposta sem conteúdo)");
-  console.log("==========================================");
-  console.log("=== FIM RESPOSTA SEFAZ ===================");
-  console.log("==========================================");
-  console.log("");
-
   const retorno = extrairRetornoSefaz(resposta.body);
+  console.log("========== RETORNO SEFAZ ==================");
+  console.log(`HTTP: ${resposta.statusCode} | cStat: ${retorno.cStat || "não informado"} | xMotivo: ${retorno.xMotivo || "não informado"}`);
+  console.log(`Resposta bytes: ${Buffer.byteLength(String(resposta.body || ""), "utf8")} | SHA-256: ${hashSha256Texto(resposta.body)}`);
+  console.log("===========================================");
   const nfeProc = retorno.autorizado ? montarNfeProc(xmlAssinado, resposta.body) : "";
 
   return {
@@ -2199,71 +1834,29 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
   };
 }
 
-function criarRetornoFalhaTransmissao(erro) {
-  const mensagem = erro?.message || String(erro || "Falha de comunicação com a SEFAZ.");
-
-  return {
-    ok: false,
-    transmitido: false,
-    autorizado: false,
-    erroComunicacao: true,
-    tipoFalha: "comunicacao",
-    cStat: "",
-    xMotivo: mensagem,
-    nRec: "",
-    nProt: "",
-    chNFe: "",
-    dhRecbto: "",
-    httpStatus: null,
-    xmlRetorno: "",
-    nfeProc: ""
-  };
-}
-
 async function salvarRetornoSefazLocal(nota, retornoSefaz) {
   const atual = await lerNotaLocal(nota.id) || nota;
-  const agora = new Date().toISOString();
 
   atual.sefaz = {
     transmitido: !!retornoSefaz.transmitido,
     autorizado: !!retornoSefaz.autorizado,
-    erroComunicacao: !!retornoSefaz.erroComunicacao,
-    tipoFalha: retornoSefaz.tipoFalha || "",
     cStat: retornoSefaz.cStat || "",
     xMotivo: retornoSefaz.xMotivo || "",
-    cStatLote: retornoSefaz.cStatLote || "",
-    xMotivoLote: retornoSefaz.xMotivoLote || "",
-    cStatProtocolo: retornoSefaz.cStatProtocolo || "",
-    xMotivoProtocolo: retornoSefaz.xMotivoProtocolo || "",
     nRec: retornoSefaz.nRec || "",
     nProt: retornoSefaz.nProt || "",
     chNFe: retornoSefaz.chNFe || "",
     dhRecbto: retornoSefaz.dhRecbto || "",
     httpStatus: retornoSefaz.httpStatus || "",
-    atualizadoEm: agora
+    atualizadoEm: new Date().toISOString()
   };
-
-  atual.ultima_tentativa_sefaz = agora;
-  atual.tentativas_sefaz = Number(atual.tentativas_sefaz || 0) + 1;
 
   if (retornoSefaz.autorizado) {
     atual.status = "autorizada";
     atual.protocolo = retornoSefaz.nProt || "";
     atual.xml_autorizado = retornoSefaz.nfeProc || "";
-    atual.autorizada_em = agora;
-    atual.pendente_reenvio = false;
-  } else if (retornoSefaz.erroComunicacao || !retornoSefaz.transmitido) {
-    atual.status = "pendente_transmissao";
-    atual.pendente_reenvio = true;
-    atual.motivo_pendencia = retornoSefaz.xMotivo || "Falha de comunicação com a SEFAZ.";
-  } else if (retornoSefaz.cStat) {
-    atual.status = "rejeitada";
-    atual.pendente_reenvio = false;
-    atual.motivo_pendencia = retornoSefaz.xMotivo || "";
-  } else {
-    atual.status = "pendente_transmissao";
-    atual.pendente_reenvio = true;
-    atual.motivo_pendencia = retornoSefaz.xMotivo || "Sem confirmação de autorização da SEFAZ.";
+    atual.autorizada_em = new Date().toISOString();
+  } else if (retornoSefaz.transmitido) {
+    atual.status = retornoSefaz.cStat ? "rejeitada" : "pendente";
   }
 
   atual.resumoFiscal = criarResumoFiscal(atual);
@@ -2641,108 +2234,52 @@ app.get("/sefaz/status", (req, res) => {
 });
 
 app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
-  let nota = null;
-
   try {
-    nota = await lerNotaCompleta(req.params.id);
+    const nota = await lerNotaCompleta(req.params.id);
     if (!nota) {
       return res.status(404).json({ ok: false, error: "Nota não encontrada." });
     }
 
-    if (nota.sefaz?.autorizado || nota.status === "autorizada") {
-      return res.status(409).json({
-        ok: false,
-        autorizado: true,
-        cStat: nota.sefaz?.cStat || "100",
-        xMotivo: "Esta NFC-e já está autorizada e não deve ser reenviada.",
-        nProt: nota.sefaz?.nProt || nota.protocolo || ""
+    const xmlOriginal = gerarXML(nota);
+    const assinatura = tentarAssinarXmlNFe(xmlOriginal);
+
+    if (assinatura.assinado) {
+      diagnosticarXmlAssinado(xmlOriginal, assinatura.xml, {
+        numero: nota.numero,
+        serie: nota.serie,
+        chave: nota.chave || nota.chaveAcesso
       });
     }
 
-    const xmlOriginal = gerarXML(nota);
-    await salvarArquivoDiagnostico(nota, "01-xml-original.xml", xmlOriginal);
-    const assinatura = await tentarAssinarXmlNFe(xmlOriginal);
-
     if (!assinatura.assinado) {
-      const retornoFalha = {
-        ...criarRetornoFalhaTransmissao(
-          new Error(assinatura.erro || "Falha ao assinar o XML.")
-        ),
-        tipoFalha: "assinatura"
-      };
-      const notaAtualizada = await salvarRetornoSefazLocal(nota, retornoFalha);
-
       return res.status(400).json({
         ok: false,
-        transmitido: false,
-        autorizado: false,
-        status: notaAtualizada.status,
-        pendente_reenvio: true,
         error: "XML não foi assinado. Não é seguro enviar para a SEFAZ.",
         erro_assinatura: assinatura.erro
       });
     }
 
-    nota.qrCodeUrl = gerarUrlQRCodeNfce(nota);
-    nota.xml_assinado = true;
-    nota.erro_assinatura = null;
-
-    await salvarNota(nota);
-
-    try {
-      if (API_BELA_SHEETS) {
-        await salvarXmlNfceRemoto(nota, assinatura.xml);
-      }
-    } catch (erroSalvarXml) {
-      console.error("⚠ falha ao atualizar XML regenerado no Apps Script:", erroSalvarXml.message);
-    }
-
-    console.log(`↻ Reenviando NFC-e ${nota.numero} série ${nota.serie} para a SEFAZ...`);
-
     const retornoSefaz = await transmitirNfceSefaz(nota, assinatura.xml);
-    const notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
+    await salvarRetornoSefazLocal(nota, retornoSefaz);
 
-    return res.status(retornoSefaz.autorizado ? 200 : 422).json({
-      ok: !!retornoSefaz.autorizado,
-      transmitido: !!retornoSefaz.transmitido,
-      autorizado: !!retornoSefaz.autorizado,
-      status: notaAtualizada.status,
-      pendente_reenvio: !!notaAtualizada.pendente_reenvio,
-      cStat: retornoSefaz.cStat || "",
-      xMotivo: retornoSefaz.xMotivo || "",
-      cStatLote: retornoSefaz.cStatLote || "",
-      xMotivoLote: retornoSefaz.xMotivoLote || "",
-      cStatProtocolo: retornoSefaz.cStatProtocolo || "",
-      xMotivoProtocolo: retornoSefaz.xMotivoProtocolo || "",
-      nRec: retornoSefaz.nRec || "",
-      nProt: retornoSefaz.nProt || "",
-      chNFe: retornoSefaz.chNFe || "",
-      dhRecbto: retornoSefaz.dhRecbto || "",
+    res.json({
+      ok: retornoSefaz.ok,
+      transmitido: retornoSefaz.transmitido,
+      autorizado: retornoSefaz.autorizado,
+      pendente_habilitacao: !!retornoSefaz.pendente_habilitacao,
+      pendente_configuracao: !!retornoSefaz.pendente_configuracao,
+      cStat: retornoSefaz.cStat,
+      xMotivo: retornoSefaz.xMotivo,
+      nRec: retornoSefaz.nRec,
+      nProt: retornoSefaz.nProt,
+      chNFe: retornoSefaz.chNFe,
+      dhRecbto: retornoSefaz.dhRecbto,
       httpStatus: retornoSefaz.httpStatus || null
     });
   } catch (e) {
-    const retornoFalha = criarRetornoFalhaTransmissao(e);
-    let notaAtualizada = nota;
-
-    if (nota) {
-      try {
-        notaAtualizada = await salvarRetornoSefazLocal(nota, retornoFalha);
-      } catch (erroSalvar) {
-        console.error("⚠ falha ao salvar pendência de reenvio:", erroSalvar);
-      }
-    }
-
-    console.error("⚠ erro ao reenviar NFC-e para SEFAZ:", e);
-
-    return res.status(503).json({
+    res.status(400).json({
       ok: false,
-      transmitido: false,
-      autorizado: false,
-      status: notaAtualizada?.status || "pendente_transmissao",
-      pendente_reenvio: true,
-      cStat: "",
-      xMotivo: retornoFalha.xMotivo,
-      error: retornoFalha.xMotivo
+      error: e.message || "Erro ao enviar NFC-e para SEFAZ."
     });
   }
 });
@@ -2803,8 +2340,16 @@ app.post("/nfce/emitir", async (req, res) => {
     nota.xml_url = `${BASE_URL}/nfce/${encodeURIComponent(id)}/xml`;
 
     const xmlOriginal = gerarXML(nota);
-    const assinatura = await tentarAssinarXmlNFe(xmlOriginal);
+    const assinatura = tentarAssinarXmlNFe(xmlOriginal);
     const xml = assinatura.xml;
+
+    if (assinatura.assinado) {
+      diagnosticarXmlAssinado(xmlOriginal, xml, {
+        numero: nota.numero,
+        serie: nota.serie,
+        chave: nota.chave || nota.chaveAcesso
+      });
+    }
 
     nota.xml_assinado = assinatura.assinado;
     nota.erro_assinatura = assinatura.erro;
@@ -2847,21 +2392,8 @@ app.post("/nfce/emitir", async (req, res) => {
 
     console.log(`→ Enviando NFC-e ${nota.numero} série ${nota.serie} para a SEFAZ...`);
 
-    let retornoSefaz;
-    let notaAtualizada;
-
-    try {
-      retornoSefaz = await transmitirNfceSefaz(nota, xml);
-      notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
-    } catch (erroTransmissao) {
-      retornoSefaz = criarRetornoFalhaTransmissao(erroTransmissao);
-      notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
-
-      console.error(
-        `⚠ NFC-e ${nota.numero} salva como pendente_transmissao:`,
-        erroTransmissao
-      );
-    }
+    const retornoSefaz = await transmitirNfceSefaz(nota, xml);
+    const notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
 
     console.log(
       `← SEFAZ NFC-e ${nota.numero}: cStat=${retornoSefaz.cStat || "sem cStat"} ` +
@@ -2878,9 +2410,7 @@ app.post("/nfce/emitir", async (req, res) => {
       ok: !!retornoSefaz.autorizado,
       mensagem: retornoSefaz.autorizado
         ? "NFC-e autorizada pela SEFAZ."
-        : retornoSefaz.erroComunicacao
-          ? "Falha de comunicação. A NFC-e foi salva como pendente para reenvio."
-          : "A NFC-e foi processada, mas não foi autorizada.",
+        : "A NFC-e foi processada, mas não foi autorizada.",
       nfce: {
         id: notaAtualizada.id,
         numero: notaAtualizada.numero,
@@ -2899,20 +2429,13 @@ app.post("/nfce/emitir", async (req, res) => {
         autorizado: !!retornoSefaz.autorizado,
         cStat: retornoSefaz.cStat || "",
         xMotivo: retornoSefaz.xMotivo || "",
-        cStatLote: retornoSefaz.cStatLote || "",
-        xMotivoLote: retornoSefaz.xMotivoLote || "",
-        cStatProtocolo: retornoSefaz.cStatProtocolo || "",
-        xMotivoProtocolo: retornoSefaz.xMotivoProtocolo || "",
         nRec: retornoSefaz.nRec || "",
         nProt: retornoSefaz.nProt || "",
         chNFe: retornoSefaz.chNFe || "",
         dhRecbto: retornoSefaz.dhRecbto || "",
         httpStatus: retornoSefaz.httpStatus || null,
         pendente_habilitacao: !!retornoSefaz.pendente_habilitacao,
-        pendente_configuracao: !!retornoSefaz.pendente_configuracao,
-        pendente_reenvio: !!notaAtualizada.pendente_reenvio,
-        erro_comunicacao: !!retornoSefaz.erroComunicacao,
-        tentativas_sefaz: Number(notaAtualizada.tentativas_sefaz || 0)
+        pendente_configuracao: !!retornoSefaz.pendente_configuracao
       }
     });
   } catch (e) {
@@ -2977,7 +2500,7 @@ app.get("/nfce/:id/xml", async (req, res) => {
   const nota = await lerNotaCompleta(req.params.id);
   if (!nota) return res.status(404).type("text/xml").send("<erro>Nota não encontrada</erro>");
   const xmlOriginal = gerarXML(nota);
-  const assinatura = await tentarAssinarXmlNFe(xmlOriginal);
+  const assinatura = tentarAssinarXmlNFe(xmlOriginal);
   res.type("text/xml").send(assinatura.xml);
 });
 
