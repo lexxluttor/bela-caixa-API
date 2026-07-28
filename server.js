@@ -10,10 +10,9 @@ import forge from "node-forge";
 import { SignedXml } from "xml-crypto";
 import { DOMParser } from "xmldom";
 import libxmljs from "libxmljs2";
-import CanonicalisationFactory from "xml-c14n";
 
 const app = express();
-console.log("🧬 Assinador NFC-e: manual C14N 1.0 auditado v3");
+console.log("🧬 Assinador NFC-e: C14N 1.0 inclusivo local auditado v4");
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
@@ -605,22 +604,154 @@ function obterIdInfNFe(xml) {
   return id;
 }
 
-function canonicalizarXmlC14n10(noXml) {
-  return new Promise((resolve, reject) => {
-    try {
-      const fabrica = CanonicalisationFactory();
-      const canonicalizador = fabrica.createCanonicaliser(
-        "http://www.w3.org/2001/10/xml-exc-c14n#"
-      );
+// Canonical XML 1.0 inclusivo, sem comentários.
+// Implementação local para atender ao algoritmo fixo exigido pelo XSD da NF-e/NFC-e.
+function escaparTextoC14n(valor = "") {
+  return String(valor)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\r/g, "&#xD;");
+}
 
-      canonicalizador.canonicalise(noXml, (erro, resultado) => {
-        if (erro) return reject(erro);
-        resolve(String(resultado || ""));
-      });
-    } catch (erro) {
-      reject(erro);
+function escaparAtributoC14n(valor = "") {
+  return String(valor)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/"/g, "&quot;")
+    .replace(/\t/g, "&#x9;")
+    .replace(/\n/g, "&#xA;")
+    .replace(/\r/g, "&#xD;");
+}
+
+function prefixoNamespaceAtributo(atributo) {
+  const nome = String(atributo?.nodeName || "");
+  if (nome === "xmlns") return "";
+  if (nome.startsWith("xmlns:")) return nome.slice(6);
+  return null;
+}
+
+function coletarNamespacesHerdados(noXml) {
+  const cadeia = [];
+  let atual = noXml?.parentNode || null;
+
+  while (atual && atual.nodeType === 1) {
+    cadeia.unshift(atual);
+    atual = atual.parentNode;
+  }
+
+  const namespaces = new Map();
+  for (const elemento of cadeia) {
+    const atributos = elemento.attributes || [];
+    for (let i = 0; i < atributos.length; i++) {
+      const atributo = atributos.item(i);
+      const prefixo = prefixoNamespaceAtributo(atributo);
+      if (prefixo !== null) namespaces.set(prefixo, String(atributo.value || ""));
     }
+  }
+
+  return namespaces;
+}
+
+function canonicalizarElementoC14n10(elemento, namespacesRenderizados = new Map(), raiz = false) {
+  const nomeElemento = String(elemento.nodeName || "");
+  const namespacesDisponiveis = new Map();
+
+  if (raiz) {
+    for (const [prefixo, uri] of coletarNamespacesHerdados(elemento)) {
+      namespacesDisponiveis.set(prefixo, uri);
+    }
+  }
+
+  const atributosComuns = [];
+  const atributos = elemento.attributes || [];
+
+  for (let i = 0; i < atributos.length; i++) {
+    const atributo = atributos.item(i);
+    const prefixoNs = prefixoNamespaceAtributo(atributo);
+
+    if (prefixoNs !== null) {
+      namespacesDisponiveis.set(prefixoNs, String(atributo.value || ""));
+    } else {
+      atributosComuns.push(atributo);
+    }
+  }
+
+  const prefixoElemento = String(elemento.prefix || "");
+  const uriElemento = String(elemento.namespaceURI || "");
+  if (uriElemento) namespacesDisponiveis.set(prefixoElemento, uriElemento);
+
+  for (const atributo of atributosComuns) {
+    const prefixo = String(atributo.prefix || "");
+    const uri = String(atributo.namespaceURI || "");
+    if (prefixo && uri && prefixo !== "xml") namespacesDisponiveis.set(prefixo, uri);
+  }
+
+  if (!uriElemento && !prefixoElemento && namespacesRenderizados.get("") && !namespacesDisponiveis.has("")) {
+    namespacesDisponiveis.set("", "");
+  }
+
+  const declaracoes = [];
+  for (const [prefixo, uri] of namespacesDisponiveis) {
+    if (namespacesRenderizados.get(prefixo) !== uri) {
+      declaracoes.push({ prefixo, uri });
+    }
+  }
+
+  declaracoes.sort((a, b) => a.prefixo.localeCompare(b.prefixo));
+
+  atributosComuns.sort((a, b) => {
+    const uriA = String(a.namespaceURI || "");
+    const uriB = String(b.namespaceURI || "");
+    if (uriA !== uriB) return uriA < uriB ? -1 : 1;
+
+    const nomeA = String(a.localName || a.nodeName || "");
+    const nomeB = String(b.localName || b.nodeName || "");
+    return nomeA < nomeB ? -1 : nomeA > nomeB ? 1 : 0;
   });
+
+  let saida = `<${nomeElemento}`;
+
+  for (const declaracao of declaracoes) {
+    const nome = declaracao.prefixo ? `xmlns:${declaracao.prefixo}` : "xmlns";
+    saida += ` ${nome}="${escaparAtributoC14n(declaracao.uri)}"`;
+  }
+
+  for (const atributo of atributosComuns) {
+    saida += ` ${atributo.nodeName}="${escaparAtributoC14n(atributo.value)}"`;
+  }
+
+  saida += ">";
+
+  const proximosNamespaces = new Map(namespacesRenderizados);
+  for (const declaracao of declaracoes) {
+    proximosNamespaces.set(declaracao.prefixo, declaracao.uri);
+  }
+
+  const filhos = elemento.childNodes || [];
+  for (let i = 0; i < filhos.length; i++) {
+    const filho = filhos.item(i);
+
+    if (filho.nodeType === 1) {
+      saida += canonicalizarElementoC14n10(filho, proximosNamespaces, false);
+    } else if (filho.nodeType === 3 || filho.nodeType === 4) {
+      saida += escaparTextoC14n(filho.data || filho.nodeValue || "");
+    } else if (filho.nodeType === 7) {
+      saida += `<?${filho.target}${filho.data ? ` ${filho.data}` : ""}?>`;
+    }
+    // Comentários são omitidos no algoritmo exigido pela NF-e.
+  }
+
+  saida += `</${nomeElemento}>`;
+  return saida;
+}
+
+function canonicalizarXmlC14n10(noXml) {
+  if (!noXml || noXml.nodeType !== 1) {
+    throw new Error("C14N 1.0 requer um elemento XML válido.");
+  }
+
+  return canonicalizarElementoC14n10(noXml, new Map(), true);
 }
 
 function localizarElementoPorNomeLocal(doc, nome) {
@@ -637,7 +768,7 @@ async function assinarXmlNFe(xml) {
   const cert = carregarCertificadoFiscal();
   const id = obterIdInfNFe(xml);
   const DS_NS = "http://www.w3.org/2000/09/xmldsig#";
-  const C14N = "http://www.w3.org/2001/10/xml-exc-c14n#";
+  const C14N = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
   const RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
   const SHA1 = "http://www.w3.org/2000/09/xmldsig#sha1";
 
