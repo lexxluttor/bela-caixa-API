@@ -1175,7 +1175,7 @@ function gerarXML(nota) {
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <NFe xmlns="http://www.portalfiscal.inf.br/nfe">
-  <infNFe Id="${infNFeId}" versao="4.00">
+  <infNFe xmlns="http://www.portalfiscal.inf.br/nfe" Id="${infNFeId}" versao="4.00">
     <ide>
       <cUF>${NFCE_CONFIG.cUF}</cUF>
       <cNF>${esc(nota.cNF)}</cNF>
