@@ -10,9 +10,10 @@ import forge from "node-forge";
 import { SignedXml } from "xml-crypto";
 import { DOMParser } from "xmldom";
 import libxmljs from "libxmljs2";
+import CanonicalisationFactory from "xml-c14n";
 
 const app = express();
-console.log("🔬 Assinador NFC-e: cirurgia C14N-NFe v2");
+console.log("🧬 Assinador NFC-e: manual C14N 1.0 auditado v3");
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
@@ -604,103 +605,103 @@ function obterIdInfNFe(xml) {
   return id;
 }
 
-function assinarXmlNFe(xml) {
+function canonicalizarXmlC14n10(noXml) {
+  return new Promise((resolve, reject) => {
+    try {
+      const fabrica = CanonicalisationFactory();
+      const canonicalizador = fabrica.createCanonicaliser(
+        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+      );
+
+      canonicalizador.canonicalise(noXml, (erro, resultado) => {
+        if (erro) return reject(erro);
+        resolve(String(resultado || ""));
+      });
+    } catch (erro) {
+      reject(erro);
+    }
+  });
+}
+
+function localizarElementoPorNomeLocal(doc, nome) {
+  const todos = doc.getElementsByTagName("*");
+  for (let i = 0; i < todos.length; i++) {
+    const no = todos[i];
+    const local = no.localName || String(no.nodeName || "").split(":").pop();
+    if (local === nome) return no;
+  }
+  return null;
+}
+
+async function assinarXmlNFe(xml) {
   const cert = carregarCertificadoFiscal();
   const id = obterIdInfNFe(xml);
+  const DS_NS = "http://www.w3.org/2000/09/xmldsig#";
+  const C14N = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
+  const RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+  const SHA1 = "http://www.w3.org/2000/09/xmldsig#sha1";
 
-  const C14N_NFE = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
-  const NFE_NS = "http://www.portalfiscal.inf.br/nfe";
+  const docNfe = new DOMParser().parseFromString(xml, "text/xml");
+  const infNFe = localizarElementoPorNomeLocal(docNfe, "infNFe");
+  if (!infNFe) throw new Error("Tag infNFe não encontrada para assinatura manual.");
 
-  const sig = new SignedXml({
-    privateKey: cert.privateKeyPem,
-    publicCert: cert.certificatePem,
-    canonicalizationAlgorithm: C14N_NFE,
-    signatureAlgorithm: "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
-  });
+  const infNFeCanonica = await canonicalizarXmlC14n10(infNFe);
+  const digestValue = crypto.createHash("sha1").update(infNFeCanonica, "utf8").digest("base64");
 
-  // Corrige somente o contexto de namespace usado pela C14N da NFC-e.
-  const C14nOriginal = sig.CanonicalizationAlgorithms[C14N_NFE];
+  const signedInfoXml =
+    `<ds:SignedInfo xmlns:ds="${DS_NS}">` +
+      `<ds:CanonicalizationMethod Algorithm="${C14N}"/>` +
+      `<ds:SignatureMethod Algorithm="${RSA_SHA1}"/>` +
+      `<ds:Reference URI="#${id}">` +
+        `<ds:Transforms>` +
+          `<ds:Transform Algorithm="${DS_NS}enveloped-signature"/>` +
+          `<ds:Transform Algorithm="${C14N}"/>` +
+        `</ds:Transforms>` +
+        `<ds:DigestMethod Algorithm="${SHA1}"/>` +
+        `<ds:DigestValue>${digestValue}</ds:DigestValue>` +
+      `</ds:Reference>` +
+    `</ds:SignedInfo>`;
 
-  if (!C14nOriginal) {
-    throw new Error("Implementação C14N 1.0 não encontrada no xml-crypto.");
-  }
+  const docSignedInfo = new DOMParser().parseFromString(`<raiz>${signedInfoXml}</raiz>`, "text/xml");
+  const signedInfo = localizarElementoPorNomeLocal(docSignedInfo, "SignedInfo");
+  if (!signedInfo) throw new Error("SignedInfo não pôde ser criado.");
 
-  sig.CanonicalizationAlgorithms[C14N_NFE] = class C14nNFe extends C14nOriginal {
-    process(node, options = {}) {
-      const recebidos = Array.isArray(options.ancestorNamespaces)
-        ? options.ancestorNamespaces
-        : [];
+  const signedInfoCanonico = await canonicalizarXmlC14n10(signedInfo);
+  const signatureValue = crypto.sign("RSA-SHA1", Buffer.from(signedInfoCanonico, "utf8"), cert.privateKeyPem).toString("base64");
 
-      const ancestorNamespaces = recebidos.filter((ns) => {
-        const prefixo = String(ns?.prefix ?? ns?.localName ?? "");
-        return prefixo !== "";
-      });
+  const assinaturaXml =
+    `<ds:Signature xmlns:ds="${DS_NS}">` + signedInfoXml +
+      `<ds:SignatureValue>${signatureValue}</ds:SignatureValue>` +
+      `<ds:KeyInfo><ds:X509Data><ds:X509Certificate>${cert.certificateClean}</ds:X509Certificate></ds:X509Data></ds:KeyInfo>` +
+    `</ds:Signature>`;
 
-      ancestorNamespaces.unshift({
-        prefix: "",
-        localName: "",
-        namespaceURI: NFE_NS
-      });
+  const xmlAssinado = String(xml).replace(/<\/NFe>\s*$/i, `${assinaturaXml}</NFe>`);
+  if (xmlAssinado === xml) throw new Error("Não foi possível inserir Signature dentro de NFe.");
 
-      return super.process(node, {
-        ...options,
-        ancestorNamespaces
-      });
-    }
-  };
+  const docFinal = new DOMParser().parseFromString(xmlAssinado, "text/xml");
+  const infFinal = localizarElementoPorNomeLocal(docFinal, "infNFe");
+  const signedInfoFinal = localizarElementoPorNomeLocal(docFinal, "SignedInfo");
+  if (!infFinal || !signedInfoFinal) throw new Error("XML assinado não contém infNFe/SignedInfo para auditoria.");
 
-  sig.addReference({
-    xpath: "//*[local-name(.)='infNFe' and namespace-uri(.)='http://www.portalfiscal.inf.br/nfe']",
-    uri: "#" + id,
-    transforms: [
-      "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
-      "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
-    ],
-    digestAlgorithm: "http://www.w3.org/2000/09/xmldsig#sha1"
-  });
+  const infFinalCanonica = await canonicalizarXmlC14n10(infFinal);
+  const digestRecalculado = crypto.createHash("sha1").update(infFinalCanonica, "utf8").digest("base64");
+  if (digestRecalculado !== digestValue) throw new Error(`Digest local divergiu após inserir a assinatura: ${digestValue} != ${digestRecalculado}`);
 
-  sig.keyInfoProvider = {
-    getKeyInfo() {
-      return `<X509Data><X509Certificate>${cert.certificateClean}</X509Certificate></X509Data>`;
-    }
-  };
+  const signedInfoFinalCanonico = await canonicalizarXmlC14n10(signedInfoFinal);
+  const assinaturaValida = crypto.verify("RSA-SHA1", Buffer.from(signedInfoFinalCanonico, "utf8"), cert.certificatePem, Buffer.from(signatureValue, "base64"));
+  if (!assinaturaValida) throw new Error("SignatureValue não passou na verificação local.");
 
-  sig.computeSignature(xml, {
-    prefix: "ds",
-    existingPrefixes: {
-      ds: "http://www.w3.org/2000/09/xmldsig#"
-    },
-    location: {
-      reference: "//*[local-name(.)='NFe']",
-      action: "append"
-    }
-  });
-
-  const xmlAssinado = sig.getSignedXml();
-
-  if (!xmlAssinado.includes("<ds:Signature") ||
-      !xmlAssinado.includes("<ds:SignedInfo") ||
-      !xmlAssinado.includes('xmlns:ds="http://www.w3.org/2000/09/xmldsig#"')) {
-    throw new Error("Assinatura XMLDSig não foi gerada com namespace ds explícito.");
-  }
-
+  console.log("✓ Assinatura manual auditada localmente");
+  console.log("✓ DigestValue:", digestValue);
   return xmlAssinado;
 }
 
-function tentarAssinarXmlNFe(xml) {
+async function tentarAssinarXmlNFe(xml) {
   try {
-    return {
-      xml: assinarXmlNFe(xml),
-      assinado: true,
-      erro: null
-    };
+    return { xml: await assinarXmlNFe(xml), assinado: true, erro: null };
   } catch (e) {
     console.error("⚠ falha ao assinar XML:", e.message);
-    return {
-      xml,
-      assinado: false,
-      erro: e.message
-    };
+    return { xml, assinado: false, erro: e.message };
   }
 }
 
@@ -2453,7 +2454,7 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
     }
 
     const xmlOriginal = gerarXML(nota);
-    const assinatura = tentarAssinarXmlNFe(xmlOriginal);
+    const assinatura = await tentarAssinarXmlNFe(xmlOriginal);
 
     if (!assinatura.assinado) {
       const retornoFalha = {
@@ -2595,7 +2596,7 @@ app.post("/nfce/emitir", async (req, res) => {
     nota.xml_url = `${BASE_URL}/nfce/${encodeURIComponent(id)}/xml`;
 
     const xmlOriginal = gerarXML(nota);
-    const assinatura = tentarAssinarXmlNFe(xmlOriginal);
+    const assinatura = await tentarAssinarXmlNFe(xmlOriginal);
     const xml = assinatura.xml;
 
     nota.xml_assinado = assinatura.assinado;
@@ -2769,7 +2770,7 @@ app.get("/nfce/:id/xml", async (req, res) => {
   const nota = await lerNotaCompleta(req.params.id);
   if (!nota) return res.status(404).type("text/xml").send("<erro>Nota não encontrada</erro>");
   const xmlOriginal = gerarXML(nota);
-  const assinatura = tentarAssinarXmlNFe(xmlOriginal);
+  const assinatura = await tentarAssinarXmlNFe(xmlOriginal);
   res.type("text/xml").send(assinatura.xml);
 });
 
