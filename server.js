@@ -567,6 +567,14 @@ function normalizarIdCsc(valor) {
   return digitos.padStart(6, "0");
 }
 
+function obterUrlConsultaNfce() {
+  const tpAmb = String(NFCE_CONFIG.tpAmb || "2");
+
+  return tpAmb === "2"
+    ? "https://hportalsped.fazenda.mg.gov.br/portalnfce"
+    : "https://portalsped.fazenda.mg.gov.br/portalnfce";
+}
+
 function gerarUrlQRCodeNfce(nota) {
   const chave = somenteDigitos(nota.chaveAcesso || nota.chave || "");
   const versaoQrCode = "3";
@@ -575,9 +583,7 @@ function gerarUrlQRCodeNfce(nota) {
       ? NFCE_CONFIG.tpAmb
       : "2"
   );
-  const urlConsulta = (typeof NFCE_CONFIG !== "undefined" && NFCE_CONFIG.urlConsulta)
-    ? String(NFCE_CONFIG.urlConsulta).replace(/\/$/, "")
-    : "https://portalsped.fazenda.mg.gov.br/portalnfce";
+  const urlConsulta = obterUrlConsultaNfce();
 
   if (chave.length !== 44) {
     throw new Error(`Chave de acesso inválida para QR Code: esperado 44 dígitos, recebido ${chave.length}.`);
@@ -1367,7 +1373,7 @@ ${itensXml}
   </infNFe>
   <infNFeSupl>
     <qrCode><![CDATA[${qrCodeUrl}]]></qrCode>
-    <urlChave>${NFCE_CONFIG.urlConsulta}</urlChave>
+    <urlChave>${obterUrlConsultaNfce()}</urlChave>
   </infNFeSupl>
 </NFe>`;
 }
@@ -1579,7 +1585,7 @@ button{border:none;background:#111;color:#fff;padding:8px 12px;border-radius:6px
   </div>
   <div class="sep"></div>
   <div class="qrcode">${nota.qrCodeUrl ? `<img src="${gerarImagemQRCodeUrl(nota.qrCodeUrl)}" alt="QR Code NFC-e">` : "QR CODE NFC-e"}</div>
-  <div class="qr-info">Consulte pela chave de acesso em:<br>${esc(NFCE_CONFIG.urlConsulta)}</div>
+  <div class="qr-info">Consulte pela chave de acesso em:<br>${esc(obterUrlConsultaNfce())}</div>
   <div class="chave"><strong>CHAVE DE ACESSO</strong><br>${esc(chaveFormatada || chave)}</div>
   <div class="qr-info" style="margin-top:5px;">${protocolo ? `Protocolo: ${esc(protocolo)}<br>` : ""}Ambiente: ${esc(ambiente)} · XML 4.00</div>
   <div class="sep"></div>
