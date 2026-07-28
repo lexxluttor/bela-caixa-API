@@ -631,13 +631,25 @@ function assinarXmlNFe(xml) {
   };
 
   sig.computeSignature(xml, {
+    prefix: "ds",
+    existingPrefixes: {
+      ds: "http://www.w3.org/2000/09/xmldsig#"
+    },
     location: {
       reference: "//*[local-name(.)='NFe']",
       action: "append"
     }
   });
 
-  return sig.getSignedXml();
+  const xmlAssinado = sig.getSignedXml();
+
+  if (!xmlAssinado.includes("<ds:Signature") ||
+      !xmlAssinado.includes("<ds:SignedInfo") ||
+      !xmlAssinado.includes('xmlns:ds="http://www.w3.org/2000/09/xmldsig#"')) {
+    throw new Error("Assinatura XMLDSig não foi gerada com namespace ds explícito.");
+  }
+
+  return xmlAssinado;
 }
 
 function tentarAssinarXmlNFe(xml) {
