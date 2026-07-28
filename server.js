@@ -1200,6 +1200,11 @@ function gerarXML(nota) {
   const qrCodeUrl = nota.qrCodeUrl || gerarUrlQRCodeNfce(nota);
 
   const itensXml = (nota.itens || []).map((item, idx) => {
+    const descricaoProduto =
+      String(NFCE_CONFIG.tpAmb) === "2" && idx === 0
+        ? "NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
+        : String(item.descricao || "PRODUTO");
+
     const cestXml = item.cest ? `
         <CEST>${esc(item.cest)}</CEST>` : "";
 
@@ -1218,7 +1223,7 @@ function gerarXML(nota) {
       <prod>
         <cProd>${esc(item.codigo || String(idx + 1))}</cProd>
         <cEAN>${esc(item.ean || "SEM GTIN")}</cEAN>
-        <xProd>${esc(item.descricao)}</xProd>
+        <xProd>${esc(descricaoProduto)}</xProd>
         <NCM>${esc(item.ncm)}</NCM>${cestXml}
         <CFOP>${esc(item.cfop)}</CFOP>
         <uCom>${esc(item.unidade)}</uCom>
