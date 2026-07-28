@@ -575,6 +575,12 @@ function obterUrlConsultaNfce() {
     : "https://portalsped.fazenda.mg.gov.br/portalnfce";
 }
 
+function obterUrlQrCodeNfce() {
+  // Em Minas Gerais, o endpoint do QR Code é o mesmo
+  // nos ambientes de produção e homologação.
+  return "https://portalsped.fazenda.mg.gov.br/portalnfce/sistema/qrcode.xhtml";
+}
+
 function gerarUrlQRCodeNfce(nota) {
   const chave = somenteDigitos(nota.chaveAcesso || nota.chave || "");
   const versaoQrCode = "3";
@@ -583,7 +589,7 @@ function gerarUrlQRCodeNfce(nota) {
       ? NFCE_CONFIG.tpAmb
       : "2"
   );
-  const urlConsulta = obterUrlConsultaNfce();
+  const urlQrCode = obterUrlQrCodeNfce();
 
   if (chave.length !== 44) {
     throw new Error(`Chave de acesso inválida para QR Code: esperado 44 dígitos, recebido ${chave.length}.`);
@@ -595,11 +601,10 @@ function gerarUrlQRCodeNfce(nota) {
 
   // QR Code 3.0 em emissão normal/online:
   // chave de acesso | versão 3 | ambiente.
-  // CSC e hash SHA-1 pertencem ao leiaute 2.0 e não entram nesta URL.
   const parametros = `${chave}|${versaoQrCode}|${tpAmb}`;
 
-  console.log(`✔ QR Code NFC-e v3 preparado | ambiente: ${tpAmb} | CSC não utilizado`);
-  return `${urlConsulta}/sistema/qrcode.xhtml?p=${parametros}`;
+  console.log(`✔ QR Code NFC-e v3 preparado | ambiente: ${tpAmb} | endpoint MG oficial`);
+  return `${urlQrCode}?p=${parametros}`;
 }
 
 function gerarImagemQRCodeUrl(conteudo) {
