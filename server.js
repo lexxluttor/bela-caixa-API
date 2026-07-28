@@ -1100,7 +1100,7 @@ function gerarXML(nota) {
   const infNFeId = "NFe" + chave;
   const dhEmi = formatarDhEmi(nota.dataEmissaoIso);
   const totais = calcularTotaisFiscais(nota);
-  const qrCodeUrl = nota.qrCodeUrl || gerarUrlQRCodeNfce(nota);
+  const qrCodeUrl = gerarUrlQRCodeNfce(nota);
 
   const itensXml = (nota.itens || []).map((item, idx) => {
     const cestXml = item.cest ? `
@@ -2426,6 +2426,20 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
         error: "XML não foi assinado. Não é seguro enviar para a SEFAZ.",
         erro_assinatura: assinatura.erro
       });
+    }
+
+    nota.qrCodeUrl = gerarUrlQRCodeNfce(nota);
+    nota.xml_assinado = true;
+    nota.erro_assinatura = null;
+
+    await salvarNota(nota);
+
+    try {
+      if (API_BELA_SHEETS) {
+        await salvarXmlNfceRemoto(nota, assinatura.xml);
+      }
+    } catch (erroSalvarXml) {
+      console.error("⚠ falha ao atualizar XML regenerado no Apps Script:", erroSalvarXml.message);
     }
 
     console.log(`↻ Reenviando NFC-e ${nota.numero} série ${nota.serie} para a SEFAZ...`);
