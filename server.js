@@ -610,16 +610,16 @@ function assinarXmlNFe(xml) {
   const sig = new SignedXml({
     privateKey: cert.privateKeyPem,
     publicCert: cert.certificatePem,
-    canonicalizationAlgorithm: "http://www.w3.org/2001/10/xml-exc-c14n#",
+    canonicalizationAlgorithm: "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
     signatureAlgorithm: "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
   });
 
   sig.addReference({
-    xpath: "//*[local-name(.)='infNFe']",
+    xpath: "//*[local-name(.)='infNFe' and namespace-uri(.)='http://www.portalfiscal.inf.br/nfe']",
     uri: "#" + id,
     transforms: [
       "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
-      "http://www.w3.org/2001/10/xml-exc-c14n#"
+      "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
     ],
     digestAlgorithm: "http://www.w3.org/2000/09/xmldsig#sha1"
   });
@@ -1175,7 +1175,7 @@ function gerarXML(nota) {
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <NFe xmlns="http://www.portalfiscal.inf.br/nfe">
-  <infNFe Id="${infNFeId}" versao="4.00">
+  <infNFe xmlns="http://www.portalfiscal.inf.br/nfe" Id="${infNFeId}" versao="4.00">
     <ide>
       <cUF>${NFCE_CONFIG.cUF}</cUF>
       <cNF>${esc(nota.cNF)}</cNF>
