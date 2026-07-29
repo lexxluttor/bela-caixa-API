@@ -291,6 +291,7 @@ const SEFAZ_CONFIG = {
   idLotePrefixo: process.env.SEFAZ_ID_LOTE_PREFIXO || "1",
   autorizacaoUrl: process.env.SEFAZ_NFCE_AUTORIZACAO_URL || "",
   eventoUrl: process.env.SEFAZ_NFCE_EVENTO_URL || "",
+  consultaUrl: process.env.SEFAZ_NFCE_CONSULTA_URL || "",
   timeoutMs: Number(process.env.SEFAZ_TIMEOUT_MS || 30000)
 };
 
@@ -2076,6 +2077,192 @@ async function salvarRetornoSefazLocal(nota, retornoSefaz) {
 
 
 
+
+// ================= CONSULTA SITUAÇÃO / EVENTOS NA SEFAZ =================
+
+function obterUrlConsultaProtocoloSefaz() {
+  if (SEFAZ_CONFIG.consultaUrl) {
+    return SEFAZ_CONFIG.consultaUrl;
+  }
+
+  // Tenta aproveitar o mesmo host/caminho configurado para Recepção de Evento.
+  // Exemplo:
+  // .../NFeRecepcaoEvento4 -> .../NFeConsultaProtocolo4
+  if (SEFAZ_CONFIG.eventoUrl) {
+    const inferida = String(SEFAZ_CONFIG.eventoUrl)
+      .replace(/NFeRecepcaoEvento4/gi, "NFeConsultaProtocolo4")
+      .replace(/RecepcaoEvento4/gi, "NFeConsultaProtocolo4");
+
+    if (inferida !== SEFAZ_CONFIG.eventoUrl) {
+      return inferida;
+    }
+  }
+
+  return "";
+}
+
+function montarEnvelopeSoapConsultaProtocolo(chave) {
+  const chaveLimpa = somenteDigitos(chave || "");
+
+  if (chaveLimpa.length !== 44) {
+    throw new Error("Chave de acesso inválida para consulta na SEFAZ.");
+  }
+
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeConsultaProtocolo4">
+      <consSitNFe xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
+        <tpAmb>${NFCE_CONFIG.tpAmb}</tpAmb>
+        <xServ>CONSULTAR</xServ>
+        <chNFe>${chaveLimpa}</chNFe>
+      </consSitNFe>
+    </nfeDadosMsg>
+  </soap12:Body>
+</soap12:Envelope>`;
+}
+
+function nomeLocalXml(no) {
+  return no
+    ? (no.localName || String(no.nodeName || "").split(":").pop())
+    : "";
+}
+
+function textoFilhoDiretoXml(elemento, nomeTag) {
+  if (!elemento) return "";
+
+  for (let i = 0; i < elemento.childNodes.length; i++) {
+    const filho = elemento.childNodes[i];
+    if (filho.nodeType === 1 && nomeLocalXml(filho) === nomeTag) {
+      return String(filho.textContent || "").trim();
+    }
+  }
+
+  return "";
+}
+
+function primeiroDescendenteXml(elemento, nomeTag) {
+  if (!elemento) return null;
+
+  const todos = elemento.getElementsByTagName("*");
+  for (let i = 0; i < todos.length; i++) {
+    if (nomeLocalXml(todos[i]) === nomeTag) {
+      return todos[i];
+    }
+  }
+
+  return null;
+}
+
+function extrairConsultaProtocoloSefaz(xmlRetorno) {
+  const xml = String(xmlRetorno || "");
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  const todos = doc.getElementsByTagName("*");
+
+  let retConsSitNFe = null;
+
+  for (let i = 0; i < todos.length; i++) {
+    if (nomeLocalXml(todos[i]) === "retConsSitNFe") {
+      retConsSitNFe = todos[i];
+      break;
+    }
+  }
+
+  if (!retConsSitNFe) {
+    throw new Error("A SEFAZ respondeu sem a tag retConsSitNFe.");
+  }
+
+  const protocoloNFe = primeiroDescendenteXml(retConsSitNFe, "infProt");
+
+  const autorizacao = protocoloNFe
+    ? {
+        cStat: textoFilhoDiretoXml(protocoloNFe, "cStat"),
+        xMotivo: textoFilhoDiretoXml(protocoloNFe, "xMotivo"),
+        chNFe: textoFilhoDiretoXml(protocoloNFe, "chNFe"),
+        nProt: textoFilhoDiretoXml(protocoloNFe, "nProt"),
+        dhRecbto: textoFilhoDiretoXml(protocoloNFe, "dhRecbto")
+      }
+    : null;
+
+  const eventos = [];
+
+  for (let i = 0; i < todos.length; i++) {
+    if (nomeLocalXml(todos[i]) !== "procEventoNFe") continue;
+
+    const infEvento = primeiroDescendenteXml(todos[i], "infEvento");
+    if (!infEvento) continue;
+
+    eventos.push({
+      cStat: textoFilhoDiretoXml(infEvento, "cStat"),
+      xMotivo: textoFilhoDiretoXml(infEvento, "xMotivo"),
+      chNFe: textoFilhoDiretoXml(infEvento, "chNFe"),
+      tpEvento: textoFilhoDiretoXml(infEvento, "tpEvento"),
+      xEvento: textoFilhoDiretoXml(infEvento, "xEvento"),
+      nSeqEvento: textoFilhoDiretoXml(infEvento, "nSeqEvento"),
+      nProt: textoFilhoDiretoXml(infEvento, "nProt"),
+      dhRegEvento: textoFilhoDiretoXml(infEvento, "dhRegEvento")
+    });
+  }
+
+  const cancelamentos = eventos.filter(evento =>
+    evento.tpEvento === "110111" ||
+    String(evento.xEvento || "").toUpperCase().includes("CANCEL")
+  );
+
+  return {
+    tpAmb: textoFilhoDiretoXml(retConsSitNFe, "tpAmb"),
+    verAplic: textoFilhoDiretoXml(retConsSitNFe, "verAplic"),
+    cStat: textoFilhoDiretoXml(retConsSitNFe, "cStat"),
+    xMotivo: textoFilhoDiretoXml(retConsSitNFe, "xMotivo"),
+    chNFe: textoFilhoDiretoXml(retConsSitNFe, "chNFe"),
+    autorizacao,
+    eventos,
+    cancelamentos,
+    cancelada: cancelamentos.some(evento =>
+      evento.cStat === "135" || evento.cStat === "155"
+    )
+  };
+}
+
+async function consultarSituacaoNfceSefaz(nota = {}) {
+  if (!SEFAZ_CONFIG.habilitada) {
+    throw new Error("SEFAZ ainda não habilitada no sistema.");
+  }
+
+  const consultaUrl = obterUrlConsultaProtocoloSefaz();
+
+  if (!consultaUrl) {
+    throw new Error(
+      "URL de consulta não configurada. Defina SEFAZ_NFCE_CONSULTA_URL no Render."
+    );
+  }
+
+  const chave = somenteDigitos(nota.chaveAcesso || nota.chave || "");
+  const envelope = montarEnvelopeSoapConsultaProtocolo(chave);
+
+  console.log(`→ Consulta SEFAZ NFC-e ${nota.numero || ""} | chave ${chave}`);
+
+  const resposta = await httpsPostComCertificado(consultaUrl, envelope, {
+    "SOAPAction": ""
+  });
+
+  console.log("================ RETORNO CONSULTA SEFAZ ================");
+  console.log(resposta.body);
+  console.log("========================================================");
+
+  const dados = extrairConsultaProtocoloSefaz(resposta.body);
+  const httpOk = resposta.statusCode >= 200 && resposta.statusCode < 300;
+
+  return {
+    ok: httpOk,
+    transmitido: true,
+    httpStatus: resposta.statusCode,
+    consultaUrl,
+    ...dados,
+    xmlRetorno: resposta.body
+  };
+}
+
 // ================= CANCELAMENTO NFC-E =================
 //
 // Preparado para cancelamento por evento 110111.
@@ -2835,6 +3022,48 @@ app.get("/nfce/:id/pdf", async (req, res) => {
 });
 
 
+
+app.get("/nfce/:id/eventos", async (req, res) => {
+  try {
+    const nota = await lerNotaCompleta(req.params.id);
+
+    if (!nota) {
+      return res.status(404).json({
+        ok: false,
+        error: "Nota não encontrada."
+      });
+    }
+
+    const consulta = await consultarSituacaoNfceSefaz(nota);
+
+    return res.status(consulta.ok ? 200 : 502).json({
+      ok: consulta.ok,
+      id: nota.id,
+      numero: nota.numero,
+      serie: nota.serie,
+      chave: consulta.chNFe || somenteDigitos(nota.chaveAcesso || nota.chave || ""),
+      situacao: {
+        cStat: consulta.cStat,
+        xMotivo: consulta.xMotivo,
+        cancelada: consulta.cancelada
+      },
+      autorizacao: consulta.autorizacao,
+      eventos: consulta.eventos,
+      cancelamentos: consulta.cancelamentos,
+      httpStatus: consulta.httpStatus,
+      consultaUrl: consulta.consultaUrl
+    });
+  } catch (e) {
+    console.error("⚠ falha na consulta de eventos da NFC-e:", e.message);
+
+    return res.status(400).json({
+      ok: false,
+      error: e.message || "Falha ao consultar a NFC-e na SEFAZ."
+    });
+  }
+});
+
+
 // Evita que dois cliques/requisições simultâneas enviem o mesmo evento duas vezes.
 // No cancelamento, nSeqEvento=1 é correto; uma segunda transmissão pode retornar 594.
 const cancelamentosEmAndamento = new Set();
@@ -2900,10 +3129,6 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
     const xmlEvento = gerarXmlEventoCancelamento(nota, motivo);
     const assinatura = tentarAssinarXmlEvento(xmlEvento);
 
-    console.log("\n================ XML EVENTO ENVIADO ================\n");
-    console.log(assinatura.xml);
-    console.log("\n====================================================\n");
-
     if (!assinatura.assinado) {
       return res.status(400).json({
         ok: false,
@@ -2913,10 +3138,6 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
     }
 
     const retorno = await transmitirCancelamentoSefaz(nota, assinatura.xml);
-
-    console.log("\n================ RETORNO DA SEFAZ ===================\n");
-    console.log(retorno.xmlRetorno || retorno.xml || retorno);
-    console.log("\n====================================================\n");
 
     const dadosCancelamento = {
       ...retorno,
