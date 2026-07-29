@@ -2078,6 +2078,211 @@ async function salvarRetornoSefazLocal(nota, retornoSefaz) {
 
 
 
+
+// ================= VALIDAÇÃO XSD EVENTO DE CANCELAMENTO =================
+
+let schemasEventoCache = null;
+
+function localizarSchemasEventoCancelamento() {
+  if (schemasEventoCache) return schemasEventoCache;
+
+  if (!fs.existsSync(SCHEMAS_NFE_DIR)) {
+    throw new Error(`Pasta de schemas não encontrada: ${SCHEMAS_NFE_DIR}`);
+  }
+
+  const encontrados = [];
+  const percorrer = (dir) => {
+    for (const nome of fs.readdirSync(dir)) {
+      const caminho = path.join(dir, nome);
+      const stat = fs.statSync(caminho);
+      if (stat.isDirectory()) percorrer(caminho);
+      else if (nome.toLowerCase().endsWith(".xsd")) encontrados.push(caminho);
+    }
+  };
+  percorrer(SCHEMAS_NFE_DIR);
+
+  const achar = (nomes, contem = []) => {
+    for (const nome of nomes) {
+      const exato = encontrados.find(p =>
+        path.basename(p).toLowerCase() === nome.toLowerCase()
+      );
+      if (exato) return exato;
+    }
+
+    return encontrados.find(p => {
+      const nome = path.basename(p).toLowerCase();
+      return contem.every(parte => nome.includes(parte.toLowerCase()));
+    }) || "";
+  };
+
+  const evento = achar(
+    [
+      "eventoCancNFe_v1.00.xsd",
+      "eventoCancNFe_v1.0.xsd",
+      "eventoCancNFe.xsd"
+    ],
+    ["evento", "canc", "nfe"]
+  );
+
+  const envelope = achar(
+    [
+      "envEventoCancNFe_v1.00.xsd",
+      "envEventoCancNFe_v1.0.xsd",
+      "envEventoCancNFe.xsd",
+      "envEvento_v1.00.xsd"
+    ],
+    ["env", "evento"]
+  );
+
+  schemasEventoCache = { evento, envelope };
+  return schemasEventoCache;
+}
+
+function validarDocumentoContraSchema(xml, schemaPath, rotulo) {
+  if (!schemaPath) {
+    return {
+      valido: null,
+      ignorado: true,
+      schema: "",
+      erros: [`Schema ${rotulo} não encontrado em ${SCHEMAS_NFE_DIR}.`]
+    };
+  }
+
+  try {
+    const schemaXml = fs.readFileSync(schemaPath, "utf8");
+    const schema = libxmljs.parseXml(schemaXml, {
+      baseUrl: schemaPath,
+      noblanks: true,
+      nonet: true
+    });
+
+    const documento = libxmljs.parseXml(String(xml || ""), {
+      noblanks: true,
+      nonet: true
+    });
+
+    const valido = documento.validate(schema);
+    const erros = valido
+      ? []
+      : formatarErrosXsd(documento.validationErrors || []);
+
+    console.log(
+      `${valido ? "✔" : "❌"} XSD ${rotulo}: ${path.relative(process.cwd(), schemaPath)}`
+    );
+
+    if (!valido) {
+      erros.forEach(erro => console.error(`   ${erro}`));
+    }
+
+    return { valido, ignorado: false, schema: schemaPath, erros };
+  } catch (e) {
+    const mensagem = `Falha na validação XSD ${rotulo}: ${e.message}`;
+    console.error(`❌ ${mensagem}`);
+    return {
+      valido: false,
+      ignorado: false,
+      schema: schemaPath,
+      erros: [mensagem]
+    };
+  }
+}
+
+function validarCoerenciaEventoCancelamento(xmlEventoAssinado) {
+  const doc = new DOMParser().parseFromString(
+    String(xmlEventoAssinado || ""),
+    "text/xml"
+  );
+
+  const infEvento = doc.getElementsByTagName("infEvento")[0];
+  if (!infEvento) {
+    return { valido: false, erros: ["Tag infEvento não encontrada."] };
+  }
+
+  const texto = nome => {
+    const no = infEvento.getElementsByTagName(nome)[0];
+    return no ? String(no.textContent || "").trim() : "";
+  };
+
+  const id = String(infEvento.getAttribute("Id") || "");
+  const tpEvento = texto("tpEvento");
+  const chave = texto("chNFe");
+  const nSeqEvento = texto("nSeqEvento");
+  const sequenciaId = String(nSeqEvento || "").padStart(2, "0");
+  const idEsperado = `ID${tpEvento}${chave}${sequenciaId}`;
+  const erros = [];
+
+  if (tpEvento !== "110111") erros.push(`tpEvento inesperado: ${tpEvento}`);
+  if (chave.length !== 44) erros.push(`chNFe deve ter 44 dígitos: ${chave.length}`);
+  if (nSeqEvento !== "1") erros.push(`nSeqEvento esperado 1, recebido ${nSeqEvento}`);
+  if (id !== idEsperado) {
+    erros.push(`Id divergente. Esperado ${idEsperado}, recebido ${id}`);
+  }
+
+  console.log("========== DIAGNÓSTICO EVENTO CANCELAMENTO ==========");
+  console.log({
+    id,
+    idEsperado,
+    tpEvento,
+    chave,
+    nSeqEvento,
+    protocolo: texto("nProt"),
+    ambiente: texto("tpAmb"),
+    coerente: erros.length === 0
+  });
+  if (erros.length) erros.forEach(e => console.error(`❌ ${e}`));
+  console.log("=====================================================");
+
+  return { valido: erros.length === 0, erros };
+}
+
+function montarEnvEventoPuro(xmlEventoAssinado, idLote) {
+  const xmlLimpo = String(xmlEventoAssinado || "")
+    .replace(/<\?xml[^>]*\?>/i, "")
+    .trim();
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<envEvento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.00">
+  <idLote>${esc(idLote)}</idLote>
+  ${xmlLimpo}
+</envEvento>`;
+}
+
+function validarCancelamentoAntesEnvio(xmlEventoAssinado, idLote) {
+  const coerencia = validarCoerenciaEventoCancelamento(xmlEventoAssinado);
+  const schemas = localizarSchemasEventoCancelamento();
+  const envEvento = montarEnvEventoPuro(xmlEventoAssinado, idLote);
+
+  const xsdEvento = validarDocumentoContraSchema(
+    xmlEventoAssinado,
+    schemas.evento,
+    "evento de cancelamento"
+  );
+
+  const xsdEnvelope = validarDocumentoContraSchema(
+    envEvento,
+    schemas.envelope,
+    "envEvento"
+  );
+
+  console.log("================ ENV EVENTO COMPLETO =================");
+  console.log(envEvento);
+  console.log("======================================================");
+
+  const falhasObrigatorias = [
+    coerencia.valido === false,
+    xsdEvento.ignorado === false && xsdEvento.valido === false,
+    xsdEnvelope.ignorado === false && xsdEnvelope.valido === false
+  ];
+
+  return {
+    valido: !falhasObrigatorias.some(Boolean),
+    coerencia,
+    xsdEvento,
+    xsdEnvelope,
+    envEvento
+  };
+}
+
 // ================= CONSULTA SITUAÇÃO / EVENTOS NA SEFAZ =================
 
 function obterUrlConsultaProtocoloSefaz() {
@@ -2552,7 +2757,25 @@ async function transmitirCancelamentoSefaz(nota, xmlEventoAssinado) {
   carregarCertificadoFiscal();
 
   const idLote = gerarIdLoteEventoNfce(nota);
+  const diagnosticoXml = validarCancelamentoAntesEnvio(xmlEventoAssinado, idLote);
+
+  if (!diagnosticoXml.valido) {
+    return {
+      ok: false,
+      transmitido: false,
+      bloqueado_validacao: true,
+      cStat: "",
+      xMotivo: "Evento de cancelamento bloqueado por falha de validação local.",
+      diagnosticoXml,
+      xmlRetorno: ""
+    };
+  }
+
   const envelope = montarEnvelopeSoapRecepcaoEvento(xmlEventoAssinado, idLote);
+
+  console.log("================ ENVELOPE SOAP ENVIADO ===============");
+  console.log(envelope);
+  console.log("======================================================");
 
   console.log(
     `→ Cancelamento NFC-e ${nota.numero} série ${nota.serie} | lote ${idLote} | enviando à SEFAZ...`
