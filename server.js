@@ -2250,22 +2250,87 @@ function montarEnvelopeSoapRecepcaoEvento(xmlEventoAssinado, idLote) {
 }
 
 function extrairRetornoEventoSefaz(xmlRetorno) {
-  const cStat = extrairTagXml(xmlRetorno, "cStat");
-  const xMotivo = extrairTagXml(xmlRetorno, "xMotivo");
-  const chNFe = extrairTagXml(xmlRetorno, "chNFe");
-  const tpEvento = extrairTagXml(xmlRetorno, "tpEvento");
-  const nSeqEvento = extrairTagXml(xmlRetorno, "nSeqEvento");
-  const nProt = extrairTagXml(xmlRetorno, "nProt");
-  const dhRegEvento = extrairTagXml(xmlRetorno, "dhRegEvento");
+  const xml = String(xmlRetorno || "");
+
+  function textoPrimeiraTagNoElemento(elemento, nomeTag) {
+    if (!elemento) return "";
+
+    const todos = elemento.getElementsByTagName("*");
+    for (let i = 0; i < todos.length; i++) {
+      const no = todos[i];
+      const nome = no.localName || String(no.nodeName || "").split(":").pop();
+      if (nome === nomeTag) {
+        return String(no.textContent || "").trim();
+      }
+    }
+
+    return "";
+  }
+
+  try {
+    const doc = new DOMParser().parseFromString(xml, "text/xml");
+    const todos = doc.getElementsByTagName("*");
+    let infEventoRetorno = null;
+
+    // O XML possui um cStat externo do lote (normalmente 128)
+    // e outro dentro de retEvento/infEvento, que é o resultado real.
+    for (let i = 0; i < todos.length; i++) {
+      const no = todos[i];
+      const nome = no.localName || String(no.nodeName || "").split(":").pop();
+
+      if (nome !== "retEvento") continue;
+
+      const descendentes = no.getElementsByTagName("*");
+      for (let j = 0; j < descendentes.length; j++) {
+        const filho = descendentes[j];
+        const nomeFilho =
+          filho.localName || String(filho.nodeName || "").split(":").pop();
+
+        if (nomeFilho === "infEvento") {
+          infEventoRetorno = filho;
+          break;
+        }
+      }
+
+      if (infEventoRetorno) break;
+    }
+
+    if (infEventoRetorno) {
+      const cStat = textoPrimeiraTagNoElemento(infEventoRetorno, "cStat");
+      const xMotivo = textoPrimeiraTagNoElemento(infEventoRetorno, "xMotivo");
+      const chNFe = textoPrimeiraTagNoElemento(infEventoRetorno, "chNFe");
+      const tpEvento = textoPrimeiraTagNoElemento(infEventoRetorno, "tpEvento");
+      const nSeqEvento = textoPrimeiraTagNoElemento(infEventoRetorno, "nSeqEvento");
+      const nProt = textoPrimeiraTagNoElemento(infEventoRetorno, "nProt");
+      const dhRegEvento = textoPrimeiraTagNoElemento(infEventoRetorno, "dhRegEvento");
+
+      return {
+        cStat,
+        xMotivo,
+        chNFe,
+        tpEvento,
+        nSeqEvento,
+        nProt,
+        dhRegEvento,
+        cancelado: cStat === "135" || cStat === "155"
+      };
+    }
+  } catch (e) {
+    console.error("⚠ falha ao interpretar retorno do evento:", e.message);
+  }
+
+  // Fallback para respostas fora do formato esperado.
+  const cStat = extrairTagXml(xml, "cStat");
+  const xMotivo = extrairTagXml(xml, "xMotivo");
 
   return {
     cStat,
     xMotivo,
-    chNFe,
-    tpEvento,
-    nSeqEvento,
-    nProt,
-    dhRegEvento,
+    chNFe: extrairTagXml(xml, "chNFe"),
+    tpEvento: extrairTagXml(xml, "tpEvento"),
+    nSeqEvento: extrairTagXml(xml, "nSeqEvento"),
+    nProt: extrairTagXml(xml, "nProt"),
+    dhRegEvento: extrairTagXml(xml, "dhRegEvento"),
     cancelado: cStat === "135" || cStat === "155"
   };
 }
@@ -2831,9 +2896,11 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
       httpStatus: retorno.httpStatus || null
     };
 
-    // Mantém HTTP 200 quando houve resposta da SEFAZ, mas o campo `ok`
-    // só fica true quando o evento foi efetivamente registrado.
-    return res.json(respostaCancelamento);
+    // Retorna sucesso HTTP somente quando a SEFAZ confirmou o cancelamento.
+    // Isso impede interfaces antigas de marcar a venda como cancelada
+    // apenas porque a requisição recebeu uma resposta do servidor.
+    const statusResposta = retorno.cancelado ? 200 : 422;
+    return res.status(statusResposta).json(respostaCancelamento);
   } catch (e) {
     res.status(400).json({
       ok: false,
