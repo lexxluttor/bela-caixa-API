@@ -956,35 +956,81 @@ function resolverFiscalProdutoCompleto(item = {}) {
 
 // ================= FORMA DE PAGAMENTO FISCAL =================
 
+function normalizarFormaPagamentoTexto(valor = "") {
+  return String(valor ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+}
+
+function extrairFormaPagamentoPayload(body = {}) {
+  const pagamento = body.pagamento;
+
+  const candidatos = [
+    pagamento && typeof pagamento === "object" ? pagamento.tipo : "",
+    pagamento && typeof pagamento === "object" ? pagamento.forma : "",
+    pagamento && typeof pagamento === "object" ? pagamento.metodo : "",
+    typeof pagamento === "string" ? pagamento : "",
+    body.forma_pagamento,
+    body.formaPagamento,
+    body.tipo_pagamento,
+    body.tipoPagamento,
+    body.metodo_pagamento,
+    body.metodoPagamento
+  ];
+
+  const encontrado = candidatos.find(v => String(v ?? "").trim() !== "");
+  return encontrado || "DINHEIRO";
+}
+
+function mapearFormaPagamentoFiscal(tipo = "") {
+  const t = normalizarFormaPagamentoTexto(tipo);
+
+  const mapaExato = new Map([
+    ["DINHEIRO", "01"],
+    ["CREDITO", "03"],
+    ["CARTAO DE CREDITO", "03"],
+    ["CARTAO CREDITO", "03"],
+    ["DEBITO", "04"],
+    ["CARTAO DE DEBITO", "04"],
+    ["CARTAO DEBITO", "04"],
+    ["CREDIARIO", "05"],
+    ["CREDIARIO NOVO", "05"],
+    ["PIX", "17"]
+  ]);
+
+  const codigo = mapaExato.get(t);
+  if (codigo) return codigo;
+
+  // Compatibilidade com rótulos maiores enviados pelo caixa.
+  if (/\bPIX\b/.test(t)) return "17";
+  if (/\bDINHEIRO\b/.test(t)) return "01";
+  if (/\bDEBITO\b/.test(t)) return "04";
+  if (/\bCREDITO\b/.test(t)) return "03";
+  if (/\bCREDIARIO\b/.test(t)) return "05";
+
+  throw new Error(`Forma de pagamento fiscal não reconhecida: "${tipo}".`);
+}
+
 function gerarDetalhePagamentoFiscal(nota = {}) {
-  const tPag = mapearFormaPagamentoFiscal(nota.pagamento?.tipo);
-  const vPag = dinheiro(nota.pagamento?.valor || nota.total);
+  const formaRecebida = nota.pagamento?.tipo || "";
+  const tPag = mapearFormaPagamentoFiscal(formaRecebida);
+  const vPag = dinheiro(nota.pagamento?.valor ?? nota.total);
   const ehCartao = tPag === "03" || tPag === "04";
+  const indPag = tPag === "05" ? "1" : "0";
 
   const grupoCartao = ehCartao
     ? `<card><tpIntegra>2</tpIntegra></card>`
     : "";
 
-  return `<detPag><indPag>0</indPag><tPag>${tPag}</tPag><vPag>${vPag}</vPag>${grupoCartao}</detPag>`;
-}
+  console.log(
+    `[NFC-e] Pagamento recebido: ${normalizarFormaPagamentoTexto(formaRecebida)} | tPag ${tPag} | card ${ehCartao ? "SIM" : "NÃO"}`
+  );
 
-function mapearFormaPagamentoFiscal(tipo = "") {
-  const t = String(tipo || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim()
-    .toUpperCase();
-
-  if (!t) return "99";
-  if (t.includes("PIX")) return "17";
-  if (t.includes("DINHEIRO")) return "01";
-  if (t.includes("DEBITO")) return "04";
-  if (t.includes("CREDITO")) return "03";
-  if (t.includes("CARTAO")) return "03";
-  if (t.includes("BOLETO")) return "15";
-  if (t.includes("CREDIARIO")) return "05";
-
-  return "99";
+  return `<detPag><indPag>${indPag}</indPag><tPag>${tPag}</tPag><vPag>${vPag}</vPag>${grupoCartao}</detPag>`;
 }
 
 // ================= APPS SCRIPT / XML / NOTAS =================
@@ -1130,7 +1176,14 @@ function normalizarPayload(body = {}) {
   const totalCalculado = subtotal - desconto;
 
   const total = body.total != null ? Number(body.total) : totalCalculado;
-  const pagamentoValor = body.pagamento?.valor != null ? Number(body.pagamento.valor) : total;
+  const pagamentoObjeto = body.pagamento && typeof body.pagamento === "object" ? body.pagamento : {};
+  const pagamentoValor =
+    pagamentoObjeto.valor != null
+      ? Number(pagamentoObjeto.valor)
+      : body.valor_pagamento != null
+        ? Number(body.valor_pagamento)
+        : total;
+  const pagamentoTipo = extrairFormaPagamentoPayload(body);
 
   return {
     vendaId: String(body.vendaId || body.id || `nfce-${Date.now()}`),
@@ -1144,7 +1197,7 @@ function normalizarPayload(body = {}) {
     desconto,
     total,
     pagamento: {
-      tipo: String((body.pagamento && body.pagamento.tipo) || body.forma_pagamento || "DINHEIRO").toUpperCase(),
+      tipo: normalizarFormaPagamentoTexto(pagamentoTipo),
       valor: pagamentoValor
     }
   };

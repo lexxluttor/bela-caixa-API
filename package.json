@@ -1,6 +1,6 @@
 {
   "name": "bela-caixa-api",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "API fiscal NFC-e Bela Modas",
   "main": "server.js",
   "type": "module",
