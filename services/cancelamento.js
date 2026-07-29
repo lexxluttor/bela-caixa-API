@@ -28,6 +28,12 @@ export function criarServicoCancelamento(deps) {
 
   const SCHEMAS_EVENTO_CANCELAMENTO_DIR = path.resolve("./schemas/evento-cancelamento");
 
+  // TESTE TEMPORÁRIO EM HOMOLOGAÇÃO: habilite no Render com SEFAZ_TESTE_NSEQ_ZERO=true.
+  // Nunca habilitar em produção.
+  const TESTE_NSEQ_ZERO =
+    String(process.env.SEFAZ_TESTE_NSEQ_ZERO || "false").toLowerCase() === "true" &&
+    String(NFCE_CONFIG.tpAmb || "") === "2";
+
   let schemasEventoCache = null;
 
   function localizarSchemasEventoCancelamento() {
@@ -160,7 +166,8 @@ export function criarServicoCancelamento(deps) {
 
     if (tpEvento !== "110111") erros.push(`tpEvento inesperado: ${tpEvento}`);
     if (chave.length !== 44) erros.push(`chNFe deve ter 44 dígitos: ${chave.length}`);
-    if (nSeqEvento !== "1") erros.push(`nSeqEvento esperado 1, recebido ${nSeqEvento}`);
+    const sequenciaEsperada = TESTE_NSEQ_ZERO ? "0" : "1";
+    if (nSeqEvento !== sequenciaEsperada) erros.push(`nSeqEvento esperado ${sequenciaEsperada}, recebido ${nSeqEvento}`);
     if (id !== idEsperado) {
       erros.push(`Id divergente. Esperado ${idEsperado}, recebido ${id}`);
     }
@@ -221,9 +228,13 @@ export function criarServicoCancelamento(deps) {
 
     const falhasObrigatorias = [
       coerencia.valido === false,
-      xsdEvento.ignorado === false && xsdEvento.valido === false,
-      xsdEnvelope.ignorado === false && xsdEnvelope.valido === false
+      !TESTE_NSEQ_ZERO && xsdEvento.ignorado === false && xsdEvento.valido === false,
+      !TESTE_NSEQ_ZERO && xsdEnvelope.ignorado === false && xsdEnvelope.valido === false
     ];
+
+    if (TESTE_NSEQ_ZERO) {
+      console.warn("⚠ TESTE HOMOLOGAÇÃO ATIVO: nSeqEvento=0 e falhas XSD não bloquearão o envio.");
+    }
 
     const valido = !falhasObrigatorias.some(Boolean);
     console.log(`VALIDAÇÃO CANCELAMENTO: ${valido ? "APROVADO" : "REPROVADO"}`);
@@ -282,7 +293,7 @@ export function criarServicoCancelamento(deps) {
   function gerarXmlEventoCancelamento(nota = {}, motivo = "") {
     const chave = String(nota.chaveAcesso || nota.chave || "");
     const protocolo = obterProtocoloAutorizacao(nota);
-    const nSeqEvento = "1";
+    const nSeqEvento = TESTE_NSEQ_ZERO ? "0" : "1";
     const tpEvento = "110111";
     const idEvento = "ID" + tpEvento + chave + nSeqEvento.padStart(2, "0");
     const dhEvento = formatarDhEmi(new Date().toISOString());
