@@ -25,6 +25,7 @@ const NOTAS_DIR = path.join(DATA_DIR, "notas");
 
 // ================= VALIDAÇÃO XSD NFC-e =================
 const SCHEMAS_NFE_DIR = path.resolve("./schemas/nfe");
+const SCHEMAS_EVENTO_CANCELAMENTO_DIR = path.resolve("./schemas/evento-cancelamento");
 let schemaNfeCache = null;
 let schemaNfePathCache = "";
 
@@ -2086,8 +2087,8 @@ let schemasEventoCache = null;
 function localizarSchemasEventoCancelamento() {
   if (schemasEventoCache) return schemasEventoCache;
 
-  if (!fs.existsSync(SCHEMAS_NFE_DIR)) {
-    throw new Error(`Pasta de schemas não encontrada: ${SCHEMAS_NFE_DIR}`);
+  if (!fs.existsSync(SCHEMAS_EVENTO_CANCELAMENTO_DIR)) {
+    throw new Error(`Pasta de schemas do cancelamento não encontrada: ${SCHEMAS_EVENTO_CANCELAMENTO_DIR}`);
   }
 
   const encontrados = [];
@@ -2099,7 +2100,7 @@ function localizarSchemasEventoCancelamento() {
       else if (nome.toLowerCase().endsWith(".xsd")) encontrados.push(caminho);
     }
   };
-  percorrer(SCHEMAS_NFE_DIR);
+  percorrer(SCHEMAS_EVENTO_CANCELAMENTO_DIR);
 
   const achar = (nomes, contem = []) => {
     for (const nome of nomes) {
@@ -2144,7 +2145,7 @@ function validarDocumentoContraSchema(xml, schemaPath, rotulo) {
       valido: null,
       ignorado: true,
       schema: "",
-      erros: [`Schema ${rotulo} não encontrado em ${SCHEMAS_NFE_DIR}.`]
+      erros: [`Schema ${rotulo} não encontrado em ${SCHEMAS_EVENTO_CANCELAMENTO_DIR}.`]
     };
   }
 
@@ -2250,6 +2251,10 @@ function montarEnvEventoPuro(xmlEventoAssinado, idLote) {
 function validarCancelamentoAntesEnvio(xmlEventoAssinado, idLote) {
   const coerencia = validarCoerenciaEventoCancelamento(xmlEventoAssinado);
   const schemas = localizarSchemasEventoCancelamento();
+  console.log("========== XSD EVENTO DE CANCELAMENTO ================");
+  console.log(`XSD EVENTO: ${schemas.evento ? "ENCONTRADO" : "NÃO ENCONTRADO"}${schemas.evento ? ` | ${path.relative(process.cwd(), schemas.evento)}` : ""}`);
+  console.log(`XSD ENVELOPE: ${schemas.envelope ? "ENCONTRADO" : "NÃO ENCONTRADO"}${schemas.envelope ? ` | ${path.relative(process.cwd(), schemas.envelope)}` : ""}`);
+  console.log("======================================================");
   const envEvento = montarEnvEventoPuro(xmlEventoAssinado, idLote);
 
   const xsdEvento = validarDocumentoContraSchema(
@@ -2274,8 +2279,11 @@ function validarCancelamentoAntesEnvio(xmlEventoAssinado, idLote) {
     xsdEnvelope.ignorado === false && xsdEnvelope.valido === false
   ];
 
+  const valido = !falhasObrigatorias.some(Boolean);
+  console.log(`VALIDAÇÃO CANCELAMENTO: ${valido ? "APROVADO" : "REPROVADO"}`);
+
   return {
-    valido: !falhasObrigatorias.some(Boolean),
+    valido,
     coerencia,
     xsdEvento,
     xsdEnvelope,
