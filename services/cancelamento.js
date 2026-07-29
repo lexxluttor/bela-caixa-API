@@ -28,11 +28,32 @@ export function criarServicoCancelamento(deps) {
 
   const SCHEMAS_EVENTO_CANCELAMENTO_DIR = path.resolve("./schemas/evento-cancelamento");
 
-  // TESTE TEMPORÁRIO EM HOMOLOGAÇÃO: habilite no Render com SEFAZ_TESTE_NSEQ_ZERO=true.
-  // Nunca habilitar em produção.
-  const TESTE_NSEQ_ZERO =
-    String(process.env.SEFAZ_TESTE_NSEQ_ZERO || "false").toLowerCase() === "true" &&
-    String(NFCE_CONFIG.tpAmb || "") === "2";
+  // Diagnóstico temporário: preserva exatamente os bytes UTF-8 enviados e recebidos.
+  // Os arquivos ficam no disco local do serviço, em storage/debug-cancelamento.
+  const DEBUG_CANCELAMENTO_DIR = path.resolve("./storage/debug-cancelamento");
+
+  function nomeSeguroDebug(valor = "") {
+    return String(valor || "")
+      .replace(/[^0-9A-Za-z_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 100) || "sem-id";
+  }
+
+  function salvarArquivoDebugCancelamento(nome, conteudo) {
+    try {
+      fs.mkdirSync(DEBUG_CANCELAMENTO_DIR, { recursive: true });
+      const caminho = path.join(DEBUG_CANCELAMENTO_DIR, nomeSeguroDebug(nome));
+      const buffer = Buffer.isBuffer(conteudo)
+        ? conteudo
+        : Buffer.from(String(conteudo ?? ""), "utf8");
+      fs.writeFileSync(caminho, buffer);
+      console.log(`[DEBUG CANCELAMENTO] arquivo salvo: ${caminho} | ${buffer.length} bytes`);
+      return caminho;
+    } catch (erro) {
+      console.error(`⚠ falha ao salvar diagnóstico do cancelamento: ${erro.message}`);
+      return "";
+    }
+  }
 
   let schemasEventoCache = null;
 
@@ -166,8 +187,7 @@ export function criarServicoCancelamento(deps) {
 
     if (tpEvento !== "110111") erros.push(`tpEvento inesperado: ${tpEvento}`);
     if (chave.length !== 44) erros.push(`chNFe deve ter 44 dígitos: ${chave.length}`);
-    const sequenciaEsperada = TESTE_NSEQ_ZERO ? "0" : "1";
-    if (nSeqEvento !== sequenciaEsperada) erros.push(`nSeqEvento esperado ${sequenciaEsperada}, recebido ${nSeqEvento}`);
+    if (nSeqEvento !== "1") erros.push(`nSeqEvento esperado 1, recebido ${nSeqEvento}`);
     if (id !== idEsperado) {
       erros.push(`Id divergente. Esperado ${idEsperado}, recebido ${id}`);
     }
@@ -228,13 +248,9 @@ export function criarServicoCancelamento(deps) {
 
     const falhasObrigatorias = [
       coerencia.valido === false,
-      !TESTE_NSEQ_ZERO && xsdEvento.ignorado === false && xsdEvento.valido === false,
-      !TESTE_NSEQ_ZERO && xsdEnvelope.ignorado === false && xsdEnvelope.valido === false
+      xsdEvento.ignorado === false && xsdEvento.valido === false,
+      xsdEnvelope.ignorado === false && xsdEnvelope.valido === false
     ];
-
-    if (TESTE_NSEQ_ZERO) {
-      console.warn("⚠ TESTE HOMOLOGAÇÃO ATIVO: nSeqEvento=0 e falhas XSD não bloquearão o envio.");
-    }
 
     const valido = !falhasObrigatorias.some(Boolean);
     console.log(`VALIDAÇÃO CANCELAMENTO: ${valido ? "APROVADO" : "REPROVADO"}`);
@@ -293,7 +309,7 @@ export function criarServicoCancelamento(deps) {
   function gerarXmlEventoCancelamento(nota = {}, motivo = "") {
     const chave = String(nota.chaveAcesso || nota.chave || "");
     const protocolo = obterProtocoloAutorizacao(nota);
-    const nSeqEvento = TESTE_NSEQ_ZERO ? "0" : "1";
+    const nSeqEvento = "1";
     const tpEvento = "110111";
     const idEvento = "ID" + tpEvento + chave + nSeqEvento.padStart(2, "0");
     const dhEvento = formatarDhEmi(new Date().toISOString());
@@ -578,6 +594,27 @@ export function criarServicoCancelamento(deps) {
 
     const envelope = montarEnvelopeSoapRecepcaoEvento(xmlEventoAssinado, idLote);
 
+    // Salva o conteúdo exato que será enviado, sem remontar ou reformatar o XML.
+    const chaveDebug = String(nota.chaveAcesso || nota.chave || nota.numero || "sem-chave");
+    const prefixoDebug = `${Date.now()}-${chaveDebug}-${idLote}`;
+    const caminhoEventoDebug = salvarArquivoDebugCancelamento(
+      `${prefixoDebug}-evento-assinado.xml`,
+      xmlEventoAssinado
+    );
+    const caminhoSoapDebug = salvarArquivoDebugCancelamento(
+      `${prefixoDebug}-soap-enviado.xml`,
+      envelope
+    );
+
+    console.log("========== BYTES EXATOS DO CANCELAMENTO ===============");
+    console.log({
+      eventoBytes: Buffer.byteLength(xmlEventoAssinado, "utf8"),
+      soapBytes: Buffer.byteLength(envelope, "utf8"),
+      caminhoEventoDebug,
+      caminhoSoapDebug
+    });
+    console.log("======================================================");
+
     console.log("================ ENVELOPE SOAP ENVIADO ===============");
     console.log(envelope);
     console.log("======================================================");
@@ -592,6 +629,11 @@ export function criarServicoCancelamento(deps) {
     const resposta = await httpsPostComCertificado(
       SEFAZ_CONFIG.eventoUrl,
       envelope
+    );
+
+    const caminhoRespostaDebug = salvarArquivoDebugCancelamento(
+      `${prefixoDebug}-soap-resposta.xml`,
+      resposta.body
     );
 
     const retorno = extrairRetornoEventoSefaz(resposta.body);
@@ -610,6 +652,9 @@ export function criarServicoCancelamento(deps) {
       chNFe: retorno.chNFe || "",
       nProt: retorno.nProt || "",
       dhRegEvento: retorno.dhRegEvento || "",
+      caminhoEventoDebug,
+      caminhoSoapDebug,
+      caminhoRespostaDebug,
       cancelado
     });
     console.log("======================================================");
