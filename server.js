@@ -2298,18 +2298,34 @@ async function transmitirCancelamentoSefaz(nota, xmlEventoAssinado) {
   const idLote = gerarIdLoteEventoNfce(nota);
   const envelope = montarEnvelopeSoapRecepcaoEvento(xmlEventoAssinado, idLote);
 
+  console.log(
+    `→ Cancelamento NFC-e ${nota.numero} série ${nota.serie} | lote ${idLote} | enviando à SEFAZ...`
+  );
+
   const resposta = await httpsPostComCertificado(SEFAZ_CONFIG.eventoUrl, envelope, {
     "SOAPAction": ""
   });
 
   const retorno = extrairRetornoEventoSefaz(resposta.body);
+  const httpOk = resposta.statusCode >= 200 && resposta.statusCode < 300;
+  const cancelado = httpOk && !!retorno.cancelado;
+
+  console.log(
+    `← Cancelamento NFC-e ${nota.numero}: HTTP ${resposta.statusCode} | ` +
+    `cStat ${retorno.cStat || "sem cStat"} | ` +
+    `${retorno.xMotivo || "sem motivo"} | ` +
+    `cancelado ${cancelado ? "SIM" : "NÃO"}`
+  );
 
   return {
-    ok: resposta.statusCode >= 200 && resposta.statusCode < 300,
+    // HTTP 200 significa apenas que o webservice respondeu.
+    // O cancelamento só é considerado bem-sucedido com cStat 135 ou 155.
+    ok: cancelado,
     transmitido: true,
     idLote,
     httpStatus: resposta.statusCode,
     ...retorno,
+    cancelado,
     xmlRetorno: resposta.body
   };
 }
@@ -2796,10 +2812,16 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
 
     await salvarCancelamentoLocal(nota, dadosCancelamento);
 
-    res.json({
-      ok: retorno.ok,
+    const respostaCancelamento = {
+      ok: !!retorno.cancelado,
       transmitido: retorno.transmitido,
-      cancelado: retorno.cancelado,
+      cancelado: !!retorno.cancelado,
+      mensagem: retorno.cancelado
+        ? "Cancelamento autorizado pela SEFAZ."
+        : "A SEFAZ respondeu, mas não autorizou o cancelamento.",
+      error: retorno.cancelado
+        ? ""
+        : (retorno.xMotivo || "Cancelamento não autorizado pela SEFAZ."),
       pendente_habilitacao: !!retorno.pendente_habilitacao,
       pendente_configuracao: !!retorno.pendente_configuracao,
       cStat: retorno.cStat,
@@ -2807,7 +2829,11 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
       nProt: retorno.nProt,
       dhRegEvento: retorno.dhRegEvento,
       httpStatus: retorno.httpStatus || null
-    });
+    };
+
+    // Mantém HTTP 200 quando houve resposta da SEFAZ, mas o campo `ok`
+    // só fica true quando o evento foi efetivamente registrado.
+    return res.json(respostaCancelamento);
   } catch (e) {
     res.status(400).json({
       ok: false,
