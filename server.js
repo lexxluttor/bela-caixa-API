@@ -1066,6 +1066,12 @@ async function salvarXmlNfceRemoto(nota, xml) {
     pagamentoTipo: nota.pagamento?.tipo || "",
     pdfUrl: nota.pdf_url || "",
     xmlUrl: nota.xml_url || "",
+    protocolo: nota.protocolo || nota.sefaz?.nProt || "",
+    cStat: nota.sefaz?.cStat || "",
+    xMotivo: nota.sefaz?.xMotivo || "",
+    dhRecbto: nota.sefaz?.dhRecbto || "",
+    autorizado: nota.sefaz?.autorizado === true || nota.status === "autorizada",
+    xmlAutorizado: nota.xml_autorizado || "",
     notaJson: JSON.stringify(nota),
     xml
   };
@@ -2035,6 +2041,36 @@ async function salvarRetornoSefazLocal(nota, retornoSefaz) {
   atual.resumoFiscal = criarResumoFiscal(atual);
 
   await salvarNota(atual);
+
+  // Atualiza no Apps Script a mesma nota após o retorno da SEFAZ.
+  // Isso preserva protocolo, cStat e XML autorizado para cancelamento/reimpressão.
+  if (API_BELA_SHEETS) {
+    let ultimoErro = null;
+
+    for (let tentativa = 1; tentativa <= 3; tentativa++) {
+      try {
+        await salvarXmlNfceRemoto(
+          atual,
+          atual.xml_autorizado || atual.xml || ""
+        );
+        ultimoErro = null;
+        break;
+      } catch (e) {
+        ultimoErro = e;
+        if (tentativa < 3) {
+          await new Promise(resolve => setTimeout(resolve, tentativa * 1000));
+        }
+      }
+    }
+
+    if (ultimoErro) {
+      console.error(
+        "⚠ autorização salva localmente, mas não foi atualizada no Apps Script:",
+        ultimoErro.message
+      );
+    }
+  }
+
   return atual;
 }
 
