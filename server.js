@@ -2900,6 +2900,10 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
     const xmlEvento = gerarXmlEventoCancelamento(nota, motivo);
     const assinatura = tentarAssinarXmlEvento(xmlEvento);
 
+    console.log("\n================ XML EVENTO ENVIADO ================\n");
+    console.log(assinatura.xml);
+    console.log("\n====================================================\n");
+
     if (!assinatura.assinado) {
       return res.status(400).json({
         ok: false,
@@ -2909,6 +2913,10 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
     }
 
     const retorno = await transmitirCancelamentoSefaz(nota, assinatura.xml);
+
+    console.log("\n================ RETORNO DA SEFAZ ===================\n");
+    console.log(retorno.xmlRetorno || retorno.xml || retorno);
+    console.log("\n====================================================\n");
 
     const dadosCancelamento = {
       ...retorno,
