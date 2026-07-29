@@ -1001,6 +1001,9 @@ function mapearFormaPagamentoFiscal(tipo = "") {
     ["CARTAO DEBITO", "04"],
     ["CREDIARIO", "05"],
     ["CREDIARIO NOVO", "05"],
+    ["FIADO", "05"],
+    ["VENDA FIADO", "05"],
+    ["A PRAZO", "05"],
     ["PIX", "17"]
   ]);
 
@@ -1012,7 +1015,7 @@ function mapearFormaPagamentoFiscal(tipo = "") {
   if (/\bDINHEIRO\b/.test(t)) return "01";
   if (/\bDEBITO\b/.test(t)) return "04";
   if (/\bCREDITO\b/.test(t)) return "03";
-  if (/\bCREDIARIO\b/.test(t)) return "05";
+  if (/\b(CREDIARIO|FIADO)\b/.test(t) || /\bA PRAZO\b/.test(t)) return "05";
 
   throw new Error(`Forma de pagamento fiscal não reconhecida: "${tipo}".`);
 }
@@ -1021,15 +1024,15 @@ function gerarDetalhePagamentoFiscal(nota = {}) {
   const formaRecebida = nota.pagamento?.tipo || "";
   const tPag = mapearFormaPagamentoFiscal(formaRecebida);
   const vPag = dinheiro(nota.pagamento?.valor ?? nota.total);
-  const ehCartao = tPag === "03" || tPag === "04";
+  const exigeGrupoCard = tPag === "03" || tPag === "04" || tPag === "17";
   const indPag = tPag === "05" ? "1" : "0";
 
-  const grupoCartao = ehCartao
+  const grupoCartao = exigeGrupoCard
     ? `<card><tpIntegra>2</tpIntegra></card>`
     : "";
 
   console.log(
-    `[NFC-e] Pagamento recebido: ${normalizarFormaPagamentoTexto(formaRecebida)} | tPag ${tPag} | card ${ehCartao ? "SIM" : "NÃO"}`
+    `[NFC-e] Pagamento recebido: ${normalizarFormaPagamentoTexto(formaRecebida)} | tPag ${tPag} | card ${exigeGrupoCard ? "SIM" : "NÃO"}`
   );
 
   return `<detPag><indPag>${indPag}</indPag><tPag>${tPag}</tPag><vPag>${vPag}</vPag>${grupoCartao}</detPag>`;
