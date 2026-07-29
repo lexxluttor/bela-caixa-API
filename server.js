@@ -2835,11 +2835,48 @@ app.get("/nfce/:id/pdf", async (req, res) => {
 });
 
 
+// Evita que dois cliques/requisições simultâneas enviem o mesmo evento duas vezes.
+// No cancelamento, nSeqEvento=1 é correto; uma segunda transmissão pode retornar 594.
+const cancelamentosEmAndamento = new Set();
+
 app.post("/nfce/:id/cancelar", async (req, res) => {
+  const idNota = String(req.params.id || "").trim();
+
+  if (cancelamentosEmAndamento.has(idNota)) {
+    return res.status(409).json({
+      ok: false,
+      cancelado: false,
+      em_andamento: true,
+      error: "O cancelamento desta NFC-e já está sendo processado. Aguarde o retorno da SEFAZ."
+    });
+  }
+
+  cancelamentosEmAndamento.add(idNota);
+
   try {
-    const nota = await lerNotaCompleta(req.params.id);
+    const notaRemota = await lerNotaCompleta(idNota);
+    const notaLocal = await lerNotaLocal(idNota);
+
+    // A leitura normal prioriza o Apps Script. Para cancelamento, o arquivo local
+    // também precisa ser consultado, pois ele recebe o retorno da SEFAZ primeiro.
+    const nota = notaRemota || notaLocal;
     if (!nota) {
       return res.status(404).json({ ok: false, error: "Nota não encontrada." });
+    }
+
+    if (notaLocal && notaJaCancelada(notaLocal)) {
+      return res.json({
+        ok: true,
+        transmitido: true,
+        cancelado: true,
+        ja_cancelado: true,
+        mensagem: "Esta NFC-e já foi cancelada pela SEFAZ.",
+        cStat: notaLocal.cancelamento?.cStat || "",
+        xMotivo: notaLocal.cancelamento?.xMotivo || "",
+        nProt: notaLocal.cancelamento?.nProt || "",
+        dhRegEvento: notaLocal.cancelamento?.dhRegEvento || "",
+        httpStatus: notaLocal.cancelamento?.httpStatus || null
+      });
     }
 
     const motivo = String(req.body?.motivo || req.body?.justificativa || "").trim();
@@ -2906,10 +2943,13 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
     const statusResposta = retorno.cancelado ? 200 : 422;
     return res.status(statusResposta).json(respostaCancelamento);
   } catch (e) {
-    res.status(400).json({
+    return res.status(400).json({
       ok: false,
+      cancelado: false,
       error: e.message || "Erro ao cancelar NFC-e."
     });
+  } finally {
+    cancelamentosEmAndamento.delete(idNota);
   }
 });
 
