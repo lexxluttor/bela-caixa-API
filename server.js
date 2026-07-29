@@ -2179,7 +2179,11 @@ function obterIdInfEvento(xml) {
 
 function assinarXmlEvento(xmlEvento) {
   const cert = carregarCertificadoFiscal();
-  const id = obterIdInfEvento(xmlEvento);
+
+  // Usa no cancelamento o mesmo preparo já validado na emissão da NFC-e.
+  // O ID e a assinatura são calculados sobre exatamente o mesmo XML compacto.
+  const xmlCompacto = compactarXmlAntesDaAssinatura(xmlEvento);
+  const id = obterIdInfEvento(xmlCompacto);
 
   const sig = new SignedXml({
     privateKey: cert.privateKeyPem,
@@ -2204,7 +2208,7 @@ function assinarXmlEvento(xmlEvento) {
     }
   };
 
-  sig.computeSignature(xmlEvento, {
+  sig.computeSignature(xmlCompacto, {
     location: {
       reference: "//*[local-name(.)='infEvento']",
       action: "after"
