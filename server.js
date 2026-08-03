@@ -264,12 +264,36 @@ const EMPRESA = {
   pais: "BRASIL"
 };
 
+const SEFAZ_AMBIENTE = String(process.env.SEFAZ_AMBIENTE || "2").trim();
+if (!["1", "2"].includes(SEFAZ_AMBIENTE)) {
+  throw new Error("SEFAZ_AMBIENTE inválido. Use 1 para produção ou 2 para homologação.");
+}
+
+const SEFAZ_ENDPOINTS_MG = {
+  "1": {
+    autorizacao: "https://nfce.fazenda.mg.gov.br/nfce/services/NFeAutorizacao4",
+    evento: "https://nfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
+    consulta: "https://nfce.fazenda.mg.gov.br/nfce/services/NFeConsultaProtocolo4",
+    status: "https://nfce.fazenda.mg.gov.br/nfce/services/NFeStatusServico4",
+    portal: "https://portalsped.fazenda.mg.gov.br/portalnfce"
+  },
+  "2": {
+    autorizacao: "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeAutorizacao4",
+    evento: "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
+    consulta: "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeConsultaProtocolo4",
+    status: "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeStatusServico4",
+    portal: "https://hportalsped.fazenda.mg.gov.br/portalnfce"
+  }
+};
+
+const ENDPOINTS_AMBIENTE = SEFAZ_ENDPOINTS_MG[SEFAZ_AMBIENTE];
+
 const NFCE_CONFIG = {
   cUF: "31",
   cMunFG: "3106705",
   modelo: "65",
   seriePadrao: 1,
-  tpAmb: "2", // 1=produção, 2=homologação
+  tpAmb: SEFAZ_AMBIENTE, // 1=produção, 2=homologação
   tpEmis: "1", // 1=normal
   tpImp: "4", // DANFE NFC-e
   finNFe: "1",
@@ -277,7 +301,7 @@ const NFCE_CONFIG = {
   indPres: "1",
   procEmi: "0",
   verProc: "Bela Caixa 1.0",
-  urlConsulta: "https://portalsped.fazenda.mg.gov.br/portalnfce"
+  urlConsulta: ENDPOINTS_AMBIENTE.portal
 };
 
 // Para NFC-e real, informe no Render:
@@ -287,12 +311,13 @@ const NFCE_CONFIG = {
 const SEFAZ_CONFIG = {
   habilitada: String(process.env.SEFAZ_HABILITADA || "false").toLowerCase() === "true",
   uf: process.env.SEFAZ_UF || "MG",
-  ambiente: process.env.SEFAZ_AMBIENTE || NFCE_CONFIG.tpAmb || "2",
+  ambiente: SEFAZ_AMBIENTE,
   versao: "4.00",
   idLotePrefixo: process.env.SEFAZ_ID_LOTE_PREFIXO || "1",
-  autorizacaoUrl: process.env.SEFAZ_NFCE_AUTORIZACAO_URL || "",
-  eventoUrl: process.env.SEFAZ_NFCE_EVENTO_URL || "",
-  consultaUrl: process.env.SEFAZ_NFCE_CONSULTA_URL || "",
+  autorizacaoUrl: process.env.SEFAZ_NFCE_AUTORIZACAO_URL || ENDPOINTS_AMBIENTE.autorizacao,
+  eventoUrl: process.env.SEFAZ_NFCE_EVENTO_URL || ENDPOINTS_AMBIENTE.evento,
+  consultaUrl: process.env.SEFAZ_NFCE_CONSULTA_URL || ENDPOINTS_AMBIENTE.consulta,
+  statusUrl: process.env.SEFAZ_NFCE_STATUS_URL || ENDPOINTS_AMBIENTE.status,
   timeoutMs: Number(process.env.SEFAZ_TIMEOUT_MS || 30000)
 };
 
@@ -614,7 +639,9 @@ function gerarImagemQRCodeUrl(conteudo) {
 }
 
 function textoHomologacao() {
-  return "EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL";
+  return String(NFCE_CONFIG.tpAmb) === "2"
+    ? "EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
+    : "";
 }
 
 
@@ -1501,7 +1528,7 @@ ${itensXml}
       ${gerarDetalhePagamentoFiscal(nota)}
     </pag>
     <infAdic>
-      <infCpl>DOCUMENTO EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL. ${textoHomologacao()}.</infCpl>
+      <infCpl>DOCUMENTO EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL.${textoHomologacao() ? " " + textoHomologacao() + "." : ""}</infCpl>
     </infAdic>
   </infNFe>
   <infNFeSupl>
@@ -1731,7 +1758,7 @@ button{border:none;background:#111;color:#fff;padding:8px 12px;border-radius:6px
   <div class="sep"></div>
   <div class="rodape">
     Documento emitido por ME/EPP optante pelo Simples Nacional.<br>
-    ${esc(textoHomologacao())}.<br>
+    ${textoHomologacao() ? esc(textoHomologacao()) + ".<br>" : ""}
     Impresso em ${esc(nota.dataEmissaoBR)}
   </div>
 </div>
@@ -3163,9 +3190,30 @@ app.get("/nfce/:id/status", async (req, res) => {
 });
 
 
+function validarAmbienteSefazNaInicializacao() {
+  const ambiente = String(NFCE_CONFIG.tpAmb);
+  const urls = [
+    SEFAZ_CONFIG.autorizacaoUrl,
+    SEFAZ_CONFIG.eventoUrl,
+    SEFAZ_CONFIG.consultaUrl
+  ].filter(Boolean);
+
+  const possuiHomologacao = urls.some(url => /:\/\/hnfce\./i.test(url));
+  const possuiProducao = urls.some(url => /:\/\/nfce\./i.test(url) && !/:\/\/hnfce\./i.test(url));
+
+  if (ambiente === "1" && possuiHomologacao) {
+    throw new Error("Configuração bloqueada: SEFAZ_AMBIENTE=1 com URL de homologação.");
+  }
+  if (ambiente === "2" && possuiProducao) {
+    throw new Error("Configuração bloqueada: SEFAZ_AMBIENTE=2 com URL de produção.");
+  }
+}
+
+validarAmbienteSefazNaInicializacao();
+
 app.listen(PORT, () => {
       console.log(`Bela Caixa API rodando na porta ${PORT}`);
-  console.log(`[NFC-e] Ambiente ${NFCE_CONFIG.tpAmb === "1" ? "produção" : "homologação"} | XSD ativo | transmissão ${SEFAZ_CONFIG.habilitada ? "habilitada" : "desabilitada"}.`);
+  console.log(`[NFC-e] Ambiente ${NFCE_CONFIG.tpAmb === "1" ? "PRODUÇÃO" : "HOMOLOGAÇÃO"} | XSD ativo | transmissão ${SEFAZ_CONFIG.habilitada ? "habilitada" : "desabilitada"} | autorização ${SEFAZ_CONFIG.autorizacaoUrl}.`);
       console.log(`Apps Script configurado: ${API_BELA_SHEETS ? "sim" : "não"}`);
     });
   })
