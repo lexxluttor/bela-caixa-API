@@ -1123,31 +1123,41 @@ async function getVendaRemota(id) {
 function sanitizarTextoFiscalReemissao(valor = "") {
   return String(valor ?? "")
     .replace(/[\u2010-\u2015\u2212]/g, "-")
-    .replace(/[\u00A0\u2007\u202F]/g, " ")
+    .replace(/\u00A0/g, " ")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function prepararItensReemissao(itens = []) {
-  return itens.map((item = {}) => {
-    const quantidade = toNumber(item.quantidade ?? item.qtd ?? item.qty, 1);
-    const valorUnitario = toNumber(item.valorUnitario ?? item.preco ?? item.valor, 0);
-    const valorTotalRecebido = toNumber(item.valorTotal, 0);
-    const valorTotal = valorTotalRecebido > 0
-      ? valorTotalRecebido
-      : Number((quantidade * valorUnitario).toFixed(2));
+function prepararItemReemissao(item = {}) {
+  const quantidade = numeroFiscalPadrao(item.qtd ?? item.quantidade ?? item.qty, 1);
+  const valorUnitario = numeroFiscalPadrao(
+    item.valorUnitario ?? item.preco ?? item.valor_unitario ?? item.valor,
+    0
+  );
+  const valorTotalRecebido = numeroFiscalPadrao(
+    item.valorTotal ?? item.total_item ?? item.totalItem,
+    0
+  );
+  const valorTotal = valorTotalRecebido > 0
+    ? valorTotalRecebido
+    : Number((quantidade * valorUnitario).toFixed(2));
 
-    return {
-      ...item,
-      descricao: sanitizarTextoFiscalReemissao(
-        item.descricao || item.nome || item.desc || "PRODUTO"
-      ),
-      quantidade,
-      valorUnitario,
-      valorTotal
-    };
-  });
+  const descricao = sanitizarTextoFiscalReemissao(
+    item.descricao || item.nome || item.desc || "PRODUTO"
+  );
+
+  return {
+    ...item,
+    descricao,
+    nome: descricao,
+    desc: descricao,
+    qtd: quantidade,
+    quantidade,
+    valorUnitario,
+    preco: valorUnitario,
+    valorTotal
+  };
 }
 
 function montarPayloadReemissaoVenda(venda = {}, vendaId = "") {
@@ -1157,13 +1167,12 @@ function montarPayloadReemissaoVenda(venda = {}, vendaId = "") {
     throw new Error("A venda foi encontrada, mas não possui itens para recriar a NFC-e.");
   }
 
-  const itens = prepararItensReemissao(itensOriginais);
+  const itens = itensOriginais.map(prepararItemReemissao);
   const totalItens = itens.reduce((soma, item) => soma + Number(item.valorTotal || 0), 0);
-  const totalVenda = Number(venda.total || 0);
-  const total = totalVenda > 0 ? totalVenda : Number(totalItens.toFixed(2));
+  const totalVenda = Number(venda.total || totalItens || 0);
 
   console.log(
-    `[NFC-e] Reemissão reconstruída: ${itens.length} item(ns) | total itens R$ ${dinheiro(totalItens)} | total venda R$ ${dinheiro(total)}`
+    `[NFC-e] Reemissão reconstruída: ${itens.length} item(ns) | total itens R$ ${totalItens.toFixed(2)} | total venda R$ ${totalVenda.toFixed(2)}`
   );
 
   return {
@@ -1171,10 +1180,10 @@ function montarPayloadReemissaoVenda(venda = {}, vendaId = "") {
     dataVenda: venda.dataVenda || venda.data || new Date().toISOString(),
     cliente: venda.cliente || "CONSUMIDOR NAO IDENTIFICADO",
     itens,
-    total,
+    total: totalVenda,
     pagamento: {
       tipo: venda.forma_pagamento || venda.formaPagamento || "DINHEIRO",
-      valor: total
+      valor: totalVenda
     }
   };
 }
