@@ -2652,6 +2652,55 @@ app.get("/sefaz/status", (req, res) => {
   });
 });
 
+function atualizarDataHoraReenvioNfce(nota) {
+  if (!nota) return nota;
+
+  const autorizado =
+    nota.status === "autorizada" ||
+    nota.sefaz?.autorizado === true ||
+    String(nota.sefaz?.cStat || "") === "100" ||
+    !!(nota.protocolo || nota.sefaz?.nProt);
+
+  if (autorizado) {
+    throw new Error("NFC-e já autorizada. O reenvio foi bloqueado para evitar duplicidade.");
+  }
+
+  const dataAnterior = nota.dataEmissaoIso || "";
+  const chaveAnterior = somenteDigitos(nota.chaveAcesso || nota.chave || "");
+  const agoraIso = new Date().toISOString();
+
+  nota.dataEmissaoIso = agoraIso;
+  nota.dataEmissaoBR = agoraBR();
+  nota.mesRef = dataMesRef(agoraIso);
+  nota.diaRef = dataDiaRef(agoraIso);
+
+  // A chave contém ano e mês. Se o reenvio ocorrer em outro mês,
+  // gera nova chave para manter coerência com a nova dhEmi.
+  const aammAnterior = chaveAnterior.slice(2, 6);
+  const aammAtual = agoraIso.slice(2, 7).replace("-", "");
+
+  if (!chaveAnterior || aammAnterior !== aammAtual) {
+    nota.cNF = gerarCodigoNumerico(nota.numero, nota.id || nota.vendaId || Date.now());
+    const novaChave = gerarChaveAcesso({
+      dataEmissaoIso: agoraIso,
+      numero: nota.numero,
+      serie: nota.serie || 1,
+      cNF: nota.cNF
+    });
+
+    nota.chaveAcesso = novaChave;
+    nota.chave = novaChave;
+    nota.cDV = novaChave.slice(-1);
+    nota.qrCodeUrl = gerarUrlQRCodeNfce({ chaveAcesso: novaChave });
+  }
+
+  console.log(
+    `[NFC-e] Data-hora atualizada para reenvio: ${dataAnterior || "sem data"} -> ${agoraIso}`
+  );
+
+  return nota;
+}
+
 app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
   try {
     const nota = await lerNotaCompleta(req.params.id);
@@ -2692,6 +2741,9 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
       );
     }
 
+    atualizarDataHoraReenvioNfce(nota);
+    await salvarNota(nota);
+
     const xmlOriginal = gerarXML(nota);
     const assinatura = tentarAssinarXmlNFe(xmlOriginal);
 
@@ -2701,6 +2753,14 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
         error: "XML não foi assinado. Não é seguro enviar para a SEFAZ.",
         erro_assinatura: assinatura.erro
       });
+    }
+
+    try {
+      if (API_BELA_SHEETS) {
+        await salvarXmlNfceRemoto(nota, assinatura.xml);
+      }
+    } catch (e) {
+      console.warn("⚠ não foi possível atualizar o XML de reenvio no Apps Script:", e.message);
     }
 
     const validacaoXsd = validarXmlNfeContraXsd(assinatura.xml);
