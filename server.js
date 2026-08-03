@@ -1370,14 +1370,64 @@ function normalizarPayload(body = {}) {
 
 // ================= XML =================
 
+function distribuirDescontoFiscalNosItens(itens = [], descontoTotal = 0) {
+  const lista = Array.isArray(itens) ? itens : [];
+  const descontoCentavos = Math.max(0, Math.round(Number(descontoTotal || 0) * 100));
+  const produtosCentavos = lista.map(item =>
+    Math.max(0, Math.round(Number(item.valorTotal || 0) * 100))
+  );
+  const somaProdutos = produtosCentavos.reduce((s, v) => s + v, 0);
+
+  if (!descontoCentavos || !lista.length || !somaProdutos) {
+    return lista.map(item => ({ ...item, descontoFiscal: 0 }));
+  }
+
+  if (descontoCentavos > somaProdutos) {
+    throw new Error("Desconto fiscal não pode ser maior que o total dos produtos.");
+  }
+
+  let distribuido = 0;
+
+  return lista.map((item, idx) => {
+    let parcela;
+
+    if (idx === lista.length - 1) {
+      parcela = descontoCentavos - distribuido;
+    } else {
+      parcela = Math.floor((descontoCentavos * produtosCentavos[idx]) / somaProdutos);
+      parcela = Math.min(parcela, produtosCentavos[idx]);
+      distribuido += parcela;
+    }
+
+    return {
+      ...item,
+      descontoFiscal: parcela / 100
+    };
+  });
+}
+
 function gerarXML(nota) {
   const chave = nota.chaveAcesso || nota.chave || "";
   const infNFeId = "NFe" + chave;
   const dhEmi = formatarDhEmi(nota.dataEmissaoIso);
-  const totais = calcularTotaisFiscais(nota);
+  const itensComDesconto = distribuirDescontoFiscalNosItens(
+    nota.itens || [],
+    nota.desconto || 0
+  );
+  const notaFiscal = { ...nota, itens: itensComDesconto };
+  const totais = calcularTotaisFiscais(notaFiscal);
   const qrCodeUrl = nota.qrCodeUrl || gerarUrlQRCodeNfce(nota);
 
-  const itensXml = (nota.itens || []).map((item, idx) => {
+  const somaDescontoItens = itensComDesconto.reduce(
+    (s, item) => s + Number(item.descontoFiscal || 0),
+    0
+  );
+
+  if (Math.round(somaDescontoItens * 100) !== Math.round(Number(totais.vDesc || 0) * 100)) {
+    throw new Error("Falha ao distribuir o desconto fiscal entre os itens.");
+  }
+
+  const itensXml = itensComDesconto.map((item, idx) => {
     const descricaoProduto =
       String(NFCE_CONFIG.tpAmb) === "2" && idx === 0
         ? "NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
@@ -1407,7 +1457,8 @@ function gerarXML(nota) {
         <uCom>${esc(item.unidade)}</uCom>
         <qCom>${quantidadeFiscal(item.quantidade)}</qCom>
         <vUnCom>${valorUnitarioFiscal(item.valorUnitario)}</vUnCom>
-        <vProd>${dinheiro(item.valorTotal)}</vProd>
+        <vProd>${dinheiro(item.valorTotal)}</vProd>${Number(item.descontoFiscal || 0) > 0 ? `
+        <vDesc>${dinheiro(item.descontoFiscal)}</vDesc>` : ""}
         <cEANTrib>${esc(item.eanTrib || item.ean || "SEM GTIN")}</cEANTrib>
         <uTrib>${esc(item.unidadeTrib || item.unidade)}</uTrib>
         <qTrib>${quantidadeFiscal(item.quantidadeTrib || item.quantidade)}</qTrib>
@@ -1441,6 +1492,12 @@ function gerarXML(nota) {
     </det>
   `;
   }).join("");
+
+  if (Number(totais.vDesc || 0) > 0) {
+    console.log(
+      `[NFC-e] Desconto fiscal distribuído nos itens: R$ ${dinheiro(totais.vDesc)} | ${itensComDesconto.length} item(ns).`
+    );
+  }
 
   const destCpf = somenteDigitos(nota.cliente?.cpf || "");
 
