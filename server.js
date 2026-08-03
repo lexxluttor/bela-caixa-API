@@ -3112,17 +3112,44 @@ ensureDirs()
     
 app.get("/nfce/:id/status", async (req, res) => {
   try {
-    const nota = await lerNotaLocal(req.params.id);
+    const idConsulta = String(req.params.id || "").trim();
+    let nota = null;
+    let origem = "";
+
+    // O Apps Script é a fonte persistente. O disco do Render é apenas cache.
+    if (API_BELA_SHEETS) {
+      try {
+        nota = await getNfceNotaRemota(idConsulta);
+        if (nota) {
+          origem = "apps_script";
+
+          // Recria o cache local quando o Render reiniciou ou perdeu o arquivo.
+          try {
+            if (nota.id) await salvarNota(nota);
+          } catch (erroCache) {
+            console.warn("⚠ não foi possível atualizar cache local da NFC-e:", erroCache.message);
+          }
+        }
+      } catch (erroRemoto) {
+        console.warn("⚠ consulta de status no Apps Script falhou:", erroRemoto.message);
+      }
+    }
+
+    if (!nota) {
+      nota = await lerNotaLocal(idConsulta);
+      if (nota) origem = "local";
+    }
 
     if (!nota) {
       return res.status(404).json({
         ok: false,
-        error: "NFC-e não encontrada."
+        error: "NFC-e não encontrada no Apps Script nem no armazenamento local."
       });
     }
 
     return res.json({
       ok: true,
+      origem,
       resumoFiscal: criarResumoFiscal(nota),
       sefaz: nota.sefaz || {},
       cancelamento: nota.cancelamento || {}
