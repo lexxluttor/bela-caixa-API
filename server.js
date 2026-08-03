@@ -1457,12 +1457,12 @@ function gerarXML(nota) {
         <uCom>${esc(item.unidade)}</uCom>
         <qCom>${quantidadeFiscal(item.quantidade)}</qCom>
         <vUnCom>${valorUnitarioFiscal(item.valorUnitario)}</vUnCom>
-        <vProd>${dinheiro(item.valorTotal)}</vProd>${Number(item.descontoFiscal || 0) > 0 ? `
-        <vDesc>${dinheiro(item.descontoFiscal)}</vDesc>` : ""}
+        <vProd>${dinheiro(item.valorTotal)}</vProd>
         <cEANTrib>${esc(item.eanTrib || item.ean || "SEM GTIN")}</cEANTrib>
         <uTrib>${esc(item.unidadeTrib || item.unidade)}</uTrib>
         <qTrib>${quantidadeFiscal(item.quantidadeTrib || item.quantidade)}</qTrib>
-        <vUnTrib>${valorUnitarioFiscal(item.valorUnitarioTrib || item.valorUnitario)}</vUnTrib>
+        <vUnTrib>${valorUnitarioFiscal(item.valorUnitarioTrib || item.valorUnitario)}</vUnTrib>${Number(item.descontoFiscal || 0) > 0 ? `
+        <vDesc>${dinheiro(item.descontoFiscal)}</vDesc>` : ""}
         <indTot>${esc(item.indTot || "1")}</indTot>
       </prod>
       <imposto>${vTotTribXml}
