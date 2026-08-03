@@ -1112,6 +1112,63 @@ async function getNfceNotaRemota(id) {
   return data.nota || null;
 }
 
+async function getVendaRemota(id) {
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
+
+  const url = montarUrlAppsScript("getVenda", { id });
+  const data = await fetchJson(url);
+  return data.venda || null;
+}
+
+function montarPayloadReemissaoVenda(venda = {}, vendaId = "") {
+  const itens = Array.isArray(venda.itens) ? venda.itens : [];
+
+  if (!itens.length) {
+    throw new Error("A venda foi encontrada, mas não possui itens para recriar a NFC-e.");
+  }
+
+  return {
+    vendaId: String(venda.vendaId || venda.id || vendaId),
+    dataVenda: venda.dataVenda || venda.data || new Date().toISOString(),
+    cliente: venda.cliente || "CONSUMIDOR NAO IDENTIFICADO",
+    itens,
+    total: Number(venda.total || 0),
+    pagamento: {
+      tipo: venda.forma_pagamento || venda.formaPagamento || "DINHEIRO",
+      valor: Number(venda.total || 0)
+    }
+  };
+}
+
+async function recriarEEmitirNfcePorVenda(vendaId) {
+  const venda = await getVendaRemota(vendaId);
+  if (!venda) return null;
+
+  const payload = montarPayloadReemissaoVenda(venda, vendaId);
+  const resposta = await fetch(`${BASE_URL}/nfce/emitir`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const texto = await resposta.text();
+  let dados = {};
+  try {
+    dados = texto ? JSON.parse(texto) : {};
+  } catch {
+    dados = { ok: false, error: "Resposta inválida ao recriar a NFC-e." };
+  }
+
+  dados.recriada = true;
+  dados.vendaId = String(vendaId);
+  dados.mensagem_recriacao = "A nota original não foi encontrada. Uma nova NFC-e foi gerada a partir da venda salva.";
+
+  return {
+    status: resposta.status,
+    dados
+  };
+}
+
 async function listarNfceNotasRemotas({ dia = "", mes = "" } = {}) {
   if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
@@ -2445,7 +2502,17 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
   try {
     const nota = await lerNotaCompleta(req.params.id);
     if (!nota) {
-      return res.status(404).json({ ok: false, error: "Nota não encontrada." });
+      console.warn(`[NFC-e] Nota ${req.params.id} não encontrada. Tentando recriar pela venda original.`);
+
+      const recriacao = await recriarEEmitirNfcePorVenda(req.params.id);
+      if (!recriacao) {
+        return res.status(404).json({
+          ok: false,
+          error: "Nota e venda original não encontradas. Não foi possível recriar a NFC-e."
+        });
+      }
+
+      return res.status(recriacao.status).json(recriacao.dados);
     }
 
     const xmlOriginal = gerarXML(nota);
