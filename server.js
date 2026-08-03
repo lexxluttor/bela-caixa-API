@@ -1188,6 +1188,28 @@ function montarPayloadReemissaoVenda(venda = {}, vendaId = "") {
   };
 }
 
+function notaLocalSemTransmissaoPodeSerRecriada(nota = {}) {
+  const status = String(nota.status || "").trim().toLowerCase();
+  const sefaz = nota.sefaz || {};
+  const protocolo = String(nota.protocolo || sefaz.nProt || "").trim();
+  const autorizada =
+    status === "autorizada" ||
+    sefaz.autorizado === true ||
+    protocolo !== "";
+  const transmitida = sefaz.transmitido === true;
+
+  if (autorizada || transmitida) return false;
+
+  return [
+    "emitida_homologacao",
+    "emitida",
+    "pendente",
+    "erro_xsd",
+    "xml_invalido",
+    "rejeitada_localmente"
+  ].includes(status);
+}
+
 async function recriarEEmitirNfcePorVenda(vendaId) {
   const venda = await getVendaRemota(vendaId);
   if (!venda) return null;
@@ -2561,6 +2583,29 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
       }
 
       return res.status(recriacao.status).json(recriacao.dados);
+    }
+
+    // Se a tentativa anterior parou localmente antes de chegar à SEFAZ
+    // (por exemplo, erro de XSD), não reutiliza o XML antigo. Reconstrói
+    // a NFC-e pela venda original, gerando nova data, número, chave e XML.
+    if (notaLocalSemTransmissaoPodeSerRecriada(nota)) {
+      const vendaId = String(nota.vendaId || req.params.id);
+      console.warn(
+        `[NFC-e] Nota ${req.params.id} existe, mas não foi transmitida à SEFAZ. ` +
+        `Descartando a tentativa local e recriando pela venda ${vendaId}.`
+      );
+
+      const recriacao = await recriarEEmitirNfcePorVenda(vendaId);
+      if (recriacao) {
+        recriacao.dados.tentativa_local_descartada = true;
+        recriacao.dados.id_tentativa_anterior = String(req.params.id);
+        return res.status(recriacao.status).json(recriacao.dados);
+      }
+
+      console.warn(
+        `[NFC-e] Venda ${vendaId} não encontrada para recriação. ` +
+        "Mantendo o fluxo da nota existente."
+      );
     }
 
     const xmlOriginal = gerarXML(nota);
