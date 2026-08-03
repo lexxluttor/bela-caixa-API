@@ -1120,22 +1120,61 @@ async function getVendaRemota(id) {
   return data.venda || null;
 }
 
-function montarPayloadReemissaoVenda(venda = {}, vendaId = "") {
-  const itens = Array.isArray(venda.itens) ? venda.itens : [];
+function sanitizarTextoFiscalReemissao(valor = "") {
+  return String(valor ?? "")
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/[\u00A0\u2007\u202F]/g, " ")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-  if (!itens.length) {
+function prepararItensReemissao(itens = []) {
+  return itens.map((item = {}) => {
+    const quantidade = toNumber(item.quantidade ?? item.qtd ?? item.qty, 1);
+    const valorUnitario = toNumber(item.valorUnitario ?? item.preco ?? item.valor, 0);
+    const valorTotalRecebido = toNumber(item.valorTotal, 0);
+    const valorTotal = valorTotalRecebido > 0
+      ? valorTotalRecebido
+      : Number((quantidade * valorUnitario).toFixed(2));
+
+    return {
+      ...item,
+      descricao: sanitizarTextoFiscalReemissao(
+        item.descricao || item.nome || item.desc || "PRODUTO"
+      ),
+      quantidade,
+      valorUnitario,
+      valorTotal
+    };
+  });
+}
+
+function montarPayloadReemissaoVenda(venda = {}, vendaId = "") {
+  const itensOriginais = Array.isArray(venda.itens) ? venda.itens : [];
+
+  if (!itensOriginais.length) {
     throw new Error("A venda foi encontrada, mas não possui itens para recriar a NFC-e.");
   }
+
+  const itens = prepararItensReemissao(itensOriginais);
+  const totalItens = itens.reduce((soma, item) => soma + Number(item.valorTotal || 0), 0);
+  const totalVenda = Number(venda.total || 0);
+  const total = totalVenda > 0 ? totalVenda : Number(totalItens.toFixed(2));
+
+  console.log(
+    `[NFC-e] Reemissão reconstruída: ${itens.length} item(ns) | total itens R$ ${dinheiro(totalItens)} | total venda R$ ${dinheiro(total)}`
+  );
 
   return {
     vendaId: String(venda.vendaId || venda.id || vendaId),
     dataVenda: venda.dataVenda || venda.data || new Date().toISOString(),
     cliente: venda.cliente || "CONSUMIDOR NAO IDENTIFICADO",
     itens,
-    total: Number(venda.total || 0),
+    total,
     pagamento: {
       tipo: venda.forma_pagamento || venda.formaPagamento || "DINHEIRO",
-      valor: Number(venda.total || 0)
+      valor: total
     }
   };
 }
