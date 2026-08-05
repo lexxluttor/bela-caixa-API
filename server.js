@@ -1221,6 +1221,54 @@ async function salvarXmlNfceRemoto(nota, xml) {
   });
 }
 
+async function salvarCancelamentoNfceRemoto(nota, dados = {}) {
+  if (!API_BELA_SHEETS) {
+    throw new Error("API_BELA_SHEETS não configurada");
+  }
+
+  const cancelado = dados.cancelado === true;
+  const payload = {
+    action: "salvarCancelamentoNfce",
+    id: nota.id,
+    nfceId: nota.id,
+    vendaId: nota.vendaId || nota.id,
+    numero: nota.numero,
+    serie: nota.serie || 1,
+    chave: somenteDigitos(nota.chaveAcesso || nota.chave || ""),
+    protocoloAutorizacao:
+      nota.protocolo ||
+      nota.sefaz?.nProt ||
+      "",
+    motivo: dados.motivo || dados.justificativa || "",
+    justificativa: dados.motivo || dados.justificativa || "",
+    status: cancelado
+      ? "cancelada"
+      : "cancelamento_rejeitado_ou_pendente",
+    cancelado,
+    cStat: dados.cStat || "",
+    xMotivo: dados.xMotivo || "",
+    nProtCancelamento: dados.nProt || dados.nProtCancelamento || "",
+    nProt: dados.nProt || dados.nProtCancelamento || "",
+    dhRegEvento: dados.dhRegEvento || "",
+    xmlEvento: dados.xmlEvento || "",
+    xmlRetorno: dados.xmlRetorno || ""
+  };
+
+  const resposta = await fetchJson(API_BELA_SHEETS, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  console.log(
+    `[NFC-e] Cancelamento sincronizado no Apps Script | ` +
+    `nota ${nota.numero} | status ${payload.status} | ` +
+    `protocolo ${payload.nProtCancelamento || "sem protocolo"}.`
+  );
+
+  return resposta;
+}
+
 async function listarXmlMesRemoto(mes) {
   if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
@@ -3055,6 +3103,124 @@ app.post("/conferencia-fiscal/consultar", async (req, res) => {
   }
 });
 
+app.post("/conferencia-fiscal/sincronizar-cancelamento", async (req, res) => {
+  try {
+    const id = String(req.body?.id || "").trim();
+
+    if (!id) {
+      return res.status(400).json({
+        ok: false,
+        error: "Informe o ID da nota para sincronizar."
+      });
+    }
+
+    const nota = await lerNotaCompleta(id);
+
+    if (!nota) {
+      return res.status(404).json({
+        ok: false,
+        error: "Nota não encontrada."
+      });
+    }
+
+    const xml = extrairXmlPersistidoConferencia(nota);
+    const identificacao = extrairIdentificacaoXmlNfce(xml);
+    const chave = somenteDigitos(
+      identificacao.chave ||
+      nota.chaveAcesso ||
+      nota.chave ||
+      ""
+    );
+
+    const ambiente = identificarAmbienteConferencia({
+      nota,
+      xml,
+      ambienteInformado: "auto"
+    });
+
+    const oficial = await consultarChaveConferenciaFiscal({
+      chave,
+      ambiente: ambiente.ambiente
+    });
+
+    if (
+      oficial.classificacao?.codigo !== "cancelada" &&
+      oficial.cancelada !== true &&
+      String(oficial.cStat || "") !== "101"
+    ) {
+      return res.status(409).json({
+        ok: false,
+        sincronizado: false,
+        error: "A SEFAZ não confirmou que esta NFC-e está cancelada.",
+        oficial
+      });
+    }
+
+    const eventoCancelamento =
+      oficial.cancelamentos?.find(evento =>
+        evento.tpEvento === "110111"
+      ) || {};
+
+    const dadosCancelamento = {
+      cancelado: true,
+      motivo:
+        nota.cancelamento?.motivo ||
+        nota.motivo_cancelamento ||
+        "Cancelamento confirmado por consulta oficial à SEFAZ",
+      cStat:
+        eventoCancelamento.cStat ||
+        oficial.cStat ||
+        "101",
+      xMotivo:
+        eventoCancelamento.xMotivo ||
+        oficial.xMotivo ||
+        "Cancelamento de NF-e homologado",
+      nProt:
+        eventoCancelamento.nProt ||
+        nota.cancelamento?.nProt ||
+        "",
+      dhRegEvento:
+        eventoCancelamento.dhRegEvento ||
+        nota.cancelamento?.dhRegEvento ||
+        "",
+      tpEvento: "110111",
+      nSeqEvento: eventoCancelamento.nSeqEvento || "1",
+      xmlEvento: nota.cancelamento?.xmlEvento || "",
+      xmlRetorno: oficial.xmlRetorno || ""
+    };
+
+    nota.status = "cancelada";
+    nota.status_nfce = "cancelada";
+    nota.cancelamento = {
+      ...(nota.cancelamento || {}),
+      ...dadosCancelamento
+    };
+
+    await salvarNota(nota);
+    await salvarCancelamentoNfceRemoto(nota, dadosCancelamento);
+
+    return res.json({
+      ok: true,
+      sincronizado: true,
+      alterouSefaz: false,
+      mensagem:
+        "Status cancelado sincronizado no Apps Script com base na consulta oficial da SEFAZ.",
+      nota: {
+        id: nota.id,
+        numero: nota.numero,
+        chave
+      },
+      oficial
+    });
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      sincronizado: false,
+      error: e.message || "Falha ao sincronizar o cancelamento."
+    });
+  }
+});
+
 app.get("/conferencia-fiscal", (req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="pt-BR">
@@ -3140,6 +3306,7 @@ function escapar(v){
 async function consultar(idForcado){
   try{
     resultado.textContent = "Consultando a SEFAZ...";
+    if (idForcado) document.getElementById("idNota").value = idForcado;
     const id = idForcado || document.getElementById("idNota").value.trim();
     const chave = document.getElementById("chave").value.replace(/\\D/g,"");
     const ambiente = document.getElementById("ambiente").value;
@@ -3178,11 +3345,50 @@ async function consultar(idForcado){
         '<div class="campo"><small>Data do cancelamento</small><strong>'+escapar(resumo.dataCancelamento || "não se aplica")+'</strong></div>'+ 
       '</div>'+ 
       '<details><summary>Ver resposta técnica completa</summary><p>O JSON técnico aparece no quadro escuro abaixo.</p></details>'+ 
-      '<p style="margin:14px 0 0;color:#5f6368"><strong>Fonte:</strong> '+escapar(resumo.fonte)+'</p>';
+      '<p style="margin:14px 0 0;color:#5f6368"><strong>Fonte:</strong> '+escapar(resumo.fonte)+'</p>'+
+      (resumo.codigoSituacao === "cancelada"
+        ? '<button style="margin-top:12px" onclick="sincronizarCancelamento()">Sincronizar cancelamento na planilha</button>'
+        : '');
 
     painel.style.display = "block";
   }catch(e){
     document.getElementById("painelOficial").style.display = "none";
+    resultado.textContent = "Erro: " + e.message;
+  }
+}
+
+async function sincronizarCancelamento(){
+  const id = document.getElementById("idNota").value.trim();
+
+  if (!id) {
+    alert("Informe ou selecione o ID da nota antes de sincronizar.");
+    return;
+  }
+
+  if (!confirm("Sincronizar o status oficial de cancelamento na planilha? Nenhum evento será reenviado à SEFAZ.")) {
+    return;
+  }
+
+  resultado.textContent = "Sincronizando o cancelamento no Apps Script...";
+
+  try {
+    const r = await fetch("/conferencia-fiscal/sincronizar-cancelamento", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ id })
+    });
+
+    const data = await r.json();
+    resultado.textContent = JSON.stringify(data, null, 2);
+
+    if (!r.ok || !data.ok) {
+      alert(data.error || "Não foi possível sincronizar.");
+      return;
+    }
+
+    alert("Cancelamento sincronizado na planilha com sucesso.");
+    carregarNotas();
+  } catch (e) {
     resultado.textContent = "Erro: " + e.message;
   }
 }
@@ -3923,20 +4129,11 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
 
       if (API_BELA_SHEETS) {
         try {
-          const xmlPersistido =
-            extrairXmlPersistidoConferencia(nota) ||
-            nota.xml ||
-            "";
-
-          await salvarXmlNfceRemoto(nota, xmlPersistido);
-
-          console.log(
-            `[NFC-e] Status cancelado sincronizado no Apps Script | ` +
-            `nota ${nota.numero} | protocolo ${retorno.nProt || ""}.`
-          );
+          await salvarCancelamentoNfceRemoto(nota, dadosCancelamento);
         } catch (erroRemoto) {
           console.error(
-            "⚠ cancelamento autorizado pela SEFAZ, mas falhou ao atualizar nfce_notas:",
+            "⚠ cancelamento autorizado pela SEFAZ, mas falhou ao gravar " +
+            "nfce_cancelamentos e atualizar nfce_notas:",
             erroRemoto.message
           );
         }
