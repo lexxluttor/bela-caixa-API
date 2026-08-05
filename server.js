@@ -1079,6 +1079,112 @@ async function obterNumeroNfceRemoto() {
   };
 }
 
+async function obterNumeroNfceSeguro() {
+  const reservado = await obterNumeroNfceRemoto();
+  let maiorRegistrado = 0;
+
+  try {
+    const notas = await listarNfceNotasRemotas({});
+    maiorRegistrado = notas.reduce(
+      (maior, nota) => Math.max(maior, Number(nota.numero || 0)),
+      0
+    );
+  } catch (e) {
+    console.warn("⚠ não foi possível conferir o maior número no Apps Script:", e.message);
+  }
+
+  const numeroReservado = Number(reservado.numero || 1);
+  const numeroSeguro = Math.max(numeroReservado, maiorRegistrado + 1);
+
+  if (numeroSeguro !== numeroReservado) {
+    console.warn(
+      `[NFC-e] Numeração remota defasada: reservada ${numeroReservado}, ` +
+      `maior registrada ${maiorRegistrado}. Usando ${numeroSeguro}.`
+    );
+  }
+
+  return {
+    numero: numeroSeguro,
+    serie: Number(reservado.serie || 1)
+  };
+}
+
+function notaTemRejeicaoDuplicidade(nota = {}) {
+  const cStat = String(
+    nota.sefaz?.cStat ||
+    nota.cStat ||
+    ""
+  ).trim();
+
+  const motivo = String(
+    nota.sefaz?.xMotivo ||
+    nota.xMotivo ||
+    nota.motivo ||
+    ""
+  ).toLowerCase();
+
+  return cStat === "539" || motivo.includes("duplicidade");
+}
+
+async function renumerarNotaRejeitadaPorDuplicidade(nota) {
+  if (!notaTemRejeicaoDuplicidade(nota)) return false;
+
+  const numeroAnterior = Number(nota.numero || 0);
+  const chaveAnterior = somenteDigitos(nota.chaveAcesso || nota.chave || "");
+  const reservado = await obterNumeroNfceSeguro();
+  const novoNumero = Math.max(
+    Number(reservado.numero || 1),
+    numeroAnterior + 1
+  );
+
+  const agoraIso = new Date().toISOString();
+  const novoCnf = gerarCodigoNumerico(
+    novoNumero,
+    `${nota.id || nota.vendaId || "nfce"}-${Date.now()}`
+  );
+  const novaChave = gerarChaveAcesso({
+    dataEmissaoIso: agoraIso,
+    numero: novoNumero,
+    serie: reservado.serie || nota.serie || 1,
+    cNF: novoCnf
+  });
+
+  nota.numero_anterior = numeroAnterior;
+  nota.chave_anterior = chaveAnterior;
+  nota.numero = novoNumero;
+  nota.serie = reservado.serie || nota.serie || 1;
+  nota.cNF = novoCnf;
+  nota.cDV = novaChave.slice(-1);
+  nota.chaveAcesso = novaChave;
+  nota.chave = novaChave;
+  nota.qrCodeUrl = gerarUrlQRCodeNfce({ chaveAcesso: novaChave });
+  nota.dataEmissaoIso = agoraIso;
+  nota.dataEmissaoBR = agoraBR();
+  nota.mesRef = dataMesRef(agoraIso);
+  nota.diaRef = dataDiaRef(agoraIso);
+  nota.status = "pendente_reenvio_renumerada";
+  nota.protocolo = "";
+  nota.xml_autorizado = "";
+  nota.sefaz = {
+    transmitido: false,
+    autorizado: false,
+    cStat: "",
+    xMotivo: "",
+    nProt: "",
+    dhRecbto: ""
+  };
+
+  nota.pdf_url = `${BASE_URL}/nfce/${encodeURIComponent(nota.id)}/pdf`;
+  nota.xml_url = `${BASE_URL}/nfce/${encodeURIComponent(nota.id)}/xml`;
+
+  console.warn(
+    `[NFC-e] Rejeição 539 detectada. Nota ${numeroAnterior} renumerada ` +
+    `com segurança para ${novoNumero}.`
+  );
+
+  return true;
+}
+
 async function salvarXmlNfceRemoto(nota, xml) {
   if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
@@ -1595,16 +1701,57 @@ ${itensXml}
 </NFe>`;
 }
 
-function nomeArquivoXML(nota) {
-  const serie = String(nota.serie || 1).padStart(3, "0");
-  const numero = String(nota.numero || 0).padStart(9, "0");
+function extrairIdentificacaoXmlNfce(xml = "") {
+  const texto = String(xml || "");
+  const numero = texto.match(/<nNF>(\d+)<\/nNF>/i)?.[1] || "";
+  const serie = texto.match(/<serie>(\d+)<\/serie>/i)?.[1] || "";
+  const chave =
+    texto.match(/<chNFe>(\d{44})<\/chNFe>/i)?.[1] ||
+    texto.match(/<infNFe\b[^>]*\bId=["']NFe(\d{44})["']/i)?.[1] ||
+    "";
+
+  return { numero, serie, chave };
+}
+
+function nomeArquivoXML(nota = {}, xml = "") {
+  const identificacao = extrairIdentificacaoXmlNfce(xml);
+  const serie = String(
+    identificacao.serie ||
+    nota.serie ||
+    1
+  ).padStart(3, "0");
+  const numero = String(
+    identificacao.numero ||
+    nota.numero ||
+    0
+  ).padStart(9, "0");
+  const chave = somenteDigitos(
+    identificacao.chave ||
+    nota.chaveAcesso ||
+    nota.chave ||
+    ""
+  );
+
+  // A chave é a identidade fiscal mais segura e evita nomes ambíguos.
+  if (chave.length === 44) {
+    return `NFCe_${numero}_${chave}.xml`;
+  }
+
   return `${EMPRESA.cnpj}65${serie}${numero}.xml`;
 }
 
 function nomeArquivoXMLRegistro(r = {}) {
-  const serie = String(r.serie || 1).padStart(3, "0");
-  const numero = String(r.numero || 0).padStart(9, "0");
-  return `${EMPRESA.cnpj}65${serie}${numero}.xml`;
+  const xml = String(r.xml || "");
+  const identificacao = extrairIdentificacaoXmlNfce(xml);
+
+  return nomeArquivoXML(
+    {
+      serie: identificacao.serie || r.serie,
+      numero: identificacao.numero || r.numero,
+      chave: identificacao.chave || r.chave
+    },
+    xml
+  );
 }
 
 // ================= ZIP XML =================
@@ -1858,12 +2005,13 @@ async function obterArquivosXmlMes(mes) {
         const notaCompleta = await getNfceNotaRemota(id);
         if (!notaCompleta) continue;
 
-        const nome = nomeArquivoXML(notaCompleta);
+        const xmlGerado = gerarXML(notaCompleta);
+        const nome = nomeArquivoXML(notaCompleta, xmlGerado);
         if (existentes.has(nome)) continue;
 
         arquivos.push({
           name: nome,
-          data: gerarXML(notaCompleta),
+          data: xmlGerado,
           date: notaCompleta.dataEmissaoIso || notaCompleta.data || new Date().toISOString()
         });
         existentes.add(nome);
@@ -1877,11 +2025,14 @@ async function obterArquivosXmlMes(mes) {
   if (!arquivos.length) {
     const lista = (await listarNotasLocal()).filter(n => n.mesRef === mes);
 
-    arquivos = lista.map(n => ({
-      name: nomeArquivoXML(n),
-      data: gerarXML(n),
-      date: n.dataEmissaoIso || n.data || new Date().toISOString()
-    }));
+    arquivos = lista.map(n => {
+      const xmlGerado = gerarXML(n);
+      return {
+        name: nomeArquivoXML(n, xmlGerado),
+        data: xmlGerado,
+        date: n.dataEmissaoIso || n.data || new Date().toISOString()
+      };
+    });
   }
 
   return arquivos;
@@ -1922,12 +2073,13 @@ async function obterArquivosXmlPeriodo(inicio, fim) {
         const notaCompleta = await getNfceNotaRemota(n.id);
         if (!notaCompleta) continue;
 
-        const nome = nomeArquivoXML(notaCompleta);
+        const xmlGerado = gerarXML(notaCompleta);
+        const nome = nomeArquivoXML(notaCompleta, xmlGerado);
         if (existentes.has(nome)) continue;
 
         arquivos.push({
           name: nome,
-          data: gerarXML(notaCompleta),
+          data: xmlGerado,
           date: notaCompleta.dataEmissaoIso || notaCompleta.data || new Date().toISOString()
         });
         existentes.add(nome);
@@ -1949,11 +2101,14 @@ async function obterArquivosXmlPeriodo(inicio, fim) {
       return true;
     });
 
-    arquivos = lista.map(n => ({
-      name: nomeArquivoXML(n),
-      data: gerarXML(n),
-      date: n.dataEmissaoIso || n.data || new Date().toISOString()
-    }));
+    arquivos = lista.map(n => {
+      const xmlGerado = gerarXML(n);
+      return {
+        name: nomeArquivoXML(n, xmlGerado),
+        data: xmlGerado,
+        date: n.dataEmissaoIso || n.data || new Date().toISOString()
+      };
+    });
   }
 
   return arquivos;
@@ -2741,7 +2896,12 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
       );
     }
 
-    atualizarDataHoraReenvioNfce(nota);
+    const foiRenumerada = await renumerarNotaRejeitadaPorDuplicidade(nota);
+
+    if (!foiRenumerada) {
+      atualizarDataHoraReenvioNfce(nota);
+    }
+
     await salvarNota(nota);
 
     const xmlOriginal = gerarXML(nota);
@@ -2788,7 +2948,11 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
       nProt: retornoSefaz.nProt,
       chNFe: retornoSefaz.chNFe,
       dhRecbto: retornoSefaz.dhRecbto,
-      httpStatus: retornoSefaz.httpStatus || null
+      httpStatus: retornoSefaz.httpStatus || null,
+      renumerada: !!foiRenumerada,
+      numeroAnterior: foiRenumerada ? nota.numero_anterior : null,
+      numeroAtual: nota.numero,
+      chaveAtual: nota.chaveAcesso || nota.chave
     });
   } catch (e) {
     res.status(400).json({
@@ -2814,7 +2978,7 @@ app.post("/nfce/emitir", async (req, res) => {
 
     try {
       if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
-      const remoto = await obterNumeroNfceRemoto();
+      const remoto = await obterNumeroNfceSeguro();
       numero = remoto.numero;
       serie = remoto.serie;
       numeracaoOrigem = "apps_script";
@@ -3019,9 +3183,13 @@ app.get("/nfce/:id", async (req, res) => {
 app.get("/nfce/:id/xml", async (req, res) => {
   const nota = await lerNotaCompleta(req.params.id);
   if (!nota) return res.status(404).type("text/xml").send("<erro>Nota não encontrada</erro>");
+
   const xmlOriginal = gerarXML(nota);
   const assinatura = tentarAssinarXmlNFe(xmlOriginal);
-  res.type("text/xml").send(assinatura.xml);
+  const nomeArquivo = nomeArquivoXML(nota, assinatura.xml);
+
+  res.setHeader("Content-Disposition", `attachment; filename="${nomeArquivo}"`);
+  res.type("application/xml").send(assinatura.xml);
 });
 
 app.get("/nfce/:id/pdf", async (req, res) => {
