@@ -2660,6 +2660,471 @@ async function consultarSituacaoNfceSefaz(nota = {}) {
   };
 }
 
+
+// ============================================================
+// MÓDULO TEMPORÁRIO DE CONFERÊNCIA FISCAL
+// Somente leitura. Não altera nota, venda, numeração ou status.
+// Para remover no futuro, apague este bloco inteiro.
+// ============================================================
+
+function extrairXmlPersistidoConferencia(nota = {}) {
+  const candidatos = [
+    nota.xml_autorizado,
+    nota.xmlAutorizado,
+    nota.xml_assinado,
+    nota.xmlAssinado,
+    nota.xml_original,
+    nota.xmlOriginal,
+    nota.xml
+  ];
+
+  return String(
+    candidatos.find(valor =>
+      typeof valor === "string" &&
+      valor.includes("<") &&
+      (valor.includes("<NFe") || valor.includes("<nfeProc"))
+    ) || ""
+  );
+}
+
+function identificarAmbienteConferencia({ nota = {}, xml = "", ambienteInformado = "" } = {}) {
+  const informado = String(ambienteInformado || "").trim();
+  const ambienteXml = String(
+    xml.match(/<tpAmb>\s*([12])\s*<\/tpAmb>/i)?.[1] || ""
+  );
+  const ambienteQr = String(
+    xml.match(/[?&]p=[^<\s]*\|3\|([12])(?:[|<\s]|$)/i)?.[1] ||
+    String(nota.qrCodeUrl || "").match(/\|3\|([12])(?:[|&\s]|$)/)?.[1] ||
+    ""
+  );
+  const ambienteNota = String(
+    nota.tpAmb ||
+    nota.ambiente ||
+    nota.sefaz?.tpAmb ||
+    nota.sefaz?.ambiente ||
+    ""
+  ).trim();
+
+  const valores = [ambienteXml, ambienteQr, ambienteNota]
+    .filter(valor => valor === "1" || valor === "2");
+
+  const divergencias = [];
+
+  if (ambienteXml && ambienteQr && ambienteXml !== ambienteQr) {
+    divergencias.push(
+      `XML informa tpAmb=${ambienteXml}, mas o QR Code informa ambiente ${ambienteQr}.`
+    );
+  }
+
+  if (informado && informado !== "auto" && !["1", "2"].includes(informado)) {
+    throw new Error("Ambiente inválido. Use 1, 2 ou auto.");
+  }
+
+  const ambiente =
+    informado && informado !== "auto"
+      ? informado
+      : ambienteXml || ambienteNota || ambienteQr || "";
+
+  if (!ambiente) {
+    throw new Error(
+      "Não foi possível identificar o ambiente. Informe 1 para produção ou 2 para homologação."
+    );
+  }
+
+  for (const valor of valores) {
+    if (valor !== ambiente) {
+      divergencias.push(
+        `O ambiente escolhido (${ambiente}) diverge de uma informação salva (${valor}).`
+      );
+    }
+  }
+
+  return {
+    ambiente,
+    ambienteXml,
+    ambienteQr,
+    ambienteNota,
+    divergencias: [...new Set(divergencias)]
+  };
+}
+
+function montarEnvelopeConsultaConferencia(chave, ambiente) {
+  const chaveLimpa = somenteDigitos(chave || "");
+
+  if (chaveLimpa.length !== 44) {
+    throw new Error("Chave de acesso inválida. A consulta exige 44 dígitos.");
+  }
+
+  if (!["1", "2"].includes(String(ambiente))) {
+    throw new Error("Ambiente inválido para consulta fiscal.");
+  }
+
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeConsultaProtocolo4">
+      <consSitNFe xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
+        <tpAmb>${ambiente}</tpAmb>
+        <xServ>CONSULTAR</xServ>
+        <chNFe>${chaveLimpa}</chNFe>
+      </consSitNFe>
+    </nfeDadosMsg>
+  </soap12:Body>
+</soap12:Envelope>`;
+}
+
+function classificarRespostaOficialConferencia(consulta = {}) {
+  const autorizacao = consulta.autorizacao || null;
+  const cStatAutorizacao = String(autorizacao?.cStat || "");
+  const cStatConsulta = String(consulta.cStat || "");
+
+  if (consulta.cancelada) {
+    return {
+      codigo: "cancelada",
+      rotulo: "CANCELADA",
+      confirmado: true
+    };
+  }
+
+  if (cStatAutorizacao === "100") {
+    return {
+      codigo: "autorizada",
+      rotulo: "AUTORIZADA",
+      confirmado: true
+    };
+  }
+
+  if (cStatConsulta === "217") {
+    return {
+      codigo: "nao_encontrada",
+      rotulo: "NÃO CONSTA NA BASE DA SEFAZ",
+      confirmado: true
+    };
+  }
+
+  if (cStatAutorizacao === "110" || cStatConsulta === "110") {
+    return {
+      codigo: "denegada",
+      rotulo: "USO DENEGADO",
+      confirmado: true
+    };
+  }
+
+  return {
+    codigo: "outra_situacao",
+    rotulo: consulta.xMotivo || autorizacao?.xMotivo || "SITUAÇÃO NÃO CLASSIFICADA",
+    confirmado: true
+  };
+}
+
+async function consultarChaveConferenciaFiscal({ chave, ambiente }) {
+  if (!SEFAZ_CONFIG.habilitada) {
+    throw new Error("A comunicação com a SEFAZ está desabilitada.");
+  }
+
+  const ambienteTexto = String(ambiente);
+  const consultaUrl = SEFAZ_ENDPOINTS_MG[ambienteTexto]?.consulta;
+
+  if (!consultaUrl) {
+    throw new Error("Endpoint de consulta não encontrado para o ambiente informado.");
+  }
+
+  const chaveLimpa = somenteDigitos(chave || "");
+  const envelope = montarEnvelopeConsultaConferencia(chaveLimpa, ambienteTexto);
+
+  console.log(
+    `[CONFERÊNCIA FISCAL] Consultando chave ${chaveLimpa} em ` +
+    `${ambienteTexto === "1" ? "PRODUÇÃO" : "HOMOLOGAÇÃO"}.`
+  );
+
+  const resposta = await httpsPostComCertificado(consultaUrl, envelope, {
+    "SOAPAction": ""
+  });
+
+  const dados = extrairConsultaProtocoloSefaz(resposta.body);
+  const classificacao = classificarRespostaOficialConferencia(dados);
+
+  return {
+    ok: resposta.statusCode >= 200 && resposta.statusCode < 300,
+    httpStatus: resposta.statusCode,
+    ambienteConsultado: ambienteTexto,
+    ambienteNome: ambienteTexto === "1" ? "PRODUÇÃO" : "HOMOLOGAÇÃO",
+    consultaUrl,
+    chave: dados.chNFe || chaveLimpa,
+    classificacao,
+    ...dados
+  };
+}
+
+function resumirNotaConferencia(nota = {}) {
+  const xml = extrairXmlPersistidoConferencia(nota);
+  const identificacao = extrairIdentificacaoXmlNfce(xml);
+  let ambiente = "";
+  let divergencias = [];
+
+  try {
+    const identificado = identificarAmbienteConferencia({ nota, xml });
+    ambiente = identificado.ambiente;
+    divergencias = identificado.divergencias;
+  } catch {}
+
+  return {
+    id: nota.id || nota.vendaId || "",
+    vendaId: nota.vendaId || "",
+    numero: Number(identificacao.numero || nota.numero || 0),
+    serie: Number(identificacao.serie || nota.serie || 1),
+    chave: identificacao.chave || nota.chaveAcesso || nota.chave || "",
+    total: Number(nota.total || 0),
+    statusInterno: nota.status || "",
+    protocoloInterno: nota.protocolo || nota.sefaz?.nProt || "",
+    ambiente,
+    ambienteNome:
+      ambiente === "1" ? "PRODUÇÃO" :
+      ambiente === "2" ? "HOMOLOGAÇÃO" :
+      "NÃO IDENTIFICADO",
+    divergencias
+  };
+}
+
+app.get("/conferencia-fiscal/notas", async (req, res) => {
+  try {
+    const dia = String(req.query.dia || "");
+    const mes = String(req.query.mes || "");
+    let notas = [];
+
+    if (API_BELA_SHEETS) {
+      notas = await listarNfceNotasRemotas({ dia, mes });
+    } else {
+      notas = await listarNotasLocal();
+    }
+
+    const ambienteFiltro = String(req.query.ambiente || "");
+    const resultado = notas
+      .map(resumirNotaConferencia)
+      .filter(nota => !ambienteFiltro || nota.ambiente === ambienteFiltro)
+      .sort((a, b) => Number(b.numero || 0) - Number(a.numero || 0));
+
+    return res.json({
+      ok: true,
+      somenteLeitura: true,
+      total: resultado.length,
+      notas: resultado
+    });
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      error: e.message || "Falha ao listar notas para conferência."
+    });
+  }
+});
+
+app.post("/conferencia-fiscal/consultar", async (req, res) => {
+  try {
+    const id = String(req.body?.id || "").trim();
+    const chaveInformada = somenteDigitos(req.body?.chave || "");
+    const ambienteInformado = String(req.body?.ambiente || "auto").trim();
+
+    let nota = null;
+
+    if (id) {
+      nota = await lerNotaCompleta(id);
+      if (!nota) {
+        return res.status(404).json({
+          ok: false,
+          error: "Nota não encontrada no Apps Script nem no armazenamento local."
+        });
+      }
+    }
+
+    const xml = String(req.body?.xml || "") || extrairXmlPersistidoConferencia(nota || {});
+    const identificacao = extrairIdentificacaoXmlNfce(xml);
+    const chave = chaveInformada ||
+      somenteDigitos(
+        identificacao.chave ||
+        nota?.chaveAcesso ||
+        nota?.chave ||
+        ""
+      );
+
+    if (chave.length !== 44) {
+      throw new Error("A nota não possui uma chave válida de 44 dígitos.");
+    }
+
+    const ambiente = identificarAmbienteConferencia({
+      nota: nota || {},
+      xml,
+      ambienteInformado
+    });
+
+    const oficial = await consultarChaveConferenciaFiscal({
+      chave,
+      ambiente: ambiente.ambiente
+    });
+
+    const statusInterno = String(nota?.status || "");
+    const protocoloInterno = String(
+      nota?.protocolo ||
+      nota?.sefaz?.nProt ||
+      ""
+    );
+    const statusOficial = oficial.classificacao.codigo;
+
+    const divergencias = [...ambiente.divergencias];
+
+    if (
+      statusInterno.toLowerCase().includes("autoriz") &&
+      statusOficial !== "autorizada"
+    ) {
+      divergencias.push(
+        `O sistema informa "${statusInterno}", mas a SEFAZ respondeu "${oficial.classificacao.rotulo}".`
+      );
+    }
+
+    if (
+      protocoloInterno &&
+      oficial.autorizacao?.nProt &&
+      protocoloInterno !== oficial.autorizacao.nProt
+    ) {
+      divergencias.push("O protocolo salvo diverge do protocolo retornado pela SEFAZ.");
+    }
+
+    return res.json({
+      ok: oficial.ok,
+      somenteLeitura: true,
+      alterouDados: false,
+      nota: nota ? resumirNotaConferencia(nota) : null,
+      ambienteDetectado: ambiente,
+      oficial,
+      divergencias: [...new Set(divergencias)]
+    });
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      somenteLeitura: true,
+      alterouDados: false,
+      error: e.message || "Falha na conferência fiscal."
+    });
+  }
+});
+
+app.get("/conferencia-fiscal", (req, res) => {
+  res.type("html").send(`<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Conferência Fiscal NFC-e</title>
+  <style>
+    :root{font-family:Arial,sans-serif;color:#202124;background:#f3f4f7}
+    body{margin:0;padding:24px}
+    .wrap{max-width:1100px;margin:auto}
+    .card{background:#fff;border:1px solid #d8dbe3;border-radius:14px;padding:18px;margin-bottom:16px;box-shadow:0 4px 18px #0000000d}
+    h1{margin:0 0 6px;font-size:25px}
+    h2{font-size:17px;margin:0 0 12px}
+    .sub{color:#5f6368;margin-bottom:18px}
+    .grid{display:grid;grid-template-columns:1fr 2fr 180px auto;gap:10px}
+    input,select,button{padding:11px 12px;border-radius:9px;border:1px solid #c9ccd5;font-size:14px}
+    button{background:#1a5276;color:#fff;border:0;font-weight:700;cursor:pointer}
+    button:hover{filter:brightness(1.08)}
+    .resultado{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.45;background:#111827;color:#e5e7eb;padding:15px;border-radius:10px;min-height:90px;overflow:auto}
+    .badge{display:inline-block;padding:5px 9px;border-radius:999px;font-weight:700;font-size:12px}
+    .prod{background:#d5f5e3;color:#176b36}.hom{background:#fff3cd;color:#7a5200}.erro{background:#fadbd8;color:#8b1e16}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{text-align:left;border-bottom:1px solid #e4e6ec;padding:9px 7px;vertical-align:top}
+    th{color:#5f6368;font-size:11px;text-transform:uppercase}
+    .mini{padding:6px 9px;font-size:12px}
+    @media(max-width:800px){.grid{grid-template-columns:1fr}.card{overflow:auto}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>🔎 Conferência Fiscal NFC-e</h1>
+    <div class="sub">Consulta oficial na SEFAZ. Este painel é somente leitura e não altera nenhuma nota.</div>
+    <div class="grid">
+      <input id="idNota" placeholder="ID da nota ou venda">
+      <input id="chave" maxlength="44" placeholder="Ou chave de acesso com 44 dígitos">
+      <select id="ambiente">
+        <option value="auto">Detectar pelo XML</option>
+        <option value="1">Produção</option>
+        <option value="2">Homologação</option>
+      </select>
+      <button onclick="consultar()">Consultar SEFAZ</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Resposta oficial</h2>
+    <div id="resultado" class="resultado">Aguardando consulta...</div>
+  </div>
+
+  <div class="card">
+    <h2>Notas encontradas no Apps Script</h2>
+    <button class="mini" onclick="carregarNotas()">Atualizar lista</button>
+    <div style="overflow:auto;margin-top:10px">
+      <table>
+        <thead><tr><th>Nº</th><th>Ambiente</th><th>Status interno</th><th>Chave</th><th></th></tr></thead>
+        <tbody id="lista"><tr><td colspan="5">Carregando...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script>
+const resultado = document.getElementById("resultado");
+
+function escapar(v){
+  return String(v == null ? "" : v)
+    .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+}
+
+async function consultar(idForcado){
+  try{
+    resultado.textContent = "Consultando a SEFAZ...";
+    const id = idForcado || document.getElementById("idNota").value.trim();
+    const chave = document.getElementById("chave").value.replace(/\\D/g,"");
+    const ambiente = document.getElementById("ambiente").value;
+
+    const r = await fetch("/conferencia-fiscal/consultar",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({id,chave,ambiente})
+    });
+    const data = await r.json();
+    resultado.textContent = JSON.stringify(data,null,2);
+  }catch(e){
+    resultado.textContent = "Erro: " + e.message;
+  }
+}
+
+async function carregarNotas(){
+  const corpo = document.getElementById("lista");
+  corpo.innerHTML = '<tr><td colspan="5">Carregando...</td></tr>';
+  try{
+    const r = await fetch("/conferencia-fiscal/notas");
+    const data = await r.json();
+    const notas = data.notas || [];
+    corpo.innerHTML = notas.map(n => {
+      const classe = n.ambiente === "1" ? "prod" : n.ambiente === "2" ? "hom" : "erro";
+      return '<tr>'+
+        '<td><strong>'+escapar(n.numero)+'</strong></td>'+
+        '<td><span class="badge '+classe+'">'+escapar(n.ambienteNome)+'</span></td>'+
+        '<td>'+escapar(n.statusInterno || "sem status")+'</td>'+
+        '<td style="font-family:monospace">'+escapar(n.chave)+'</td>'+
+        '<td><button class="mini" onclick="consultar(\\''+escapar(n.id)+'\\')">Consultar</button></td>'+
+      '</tr>';
+    }).join("") || '<tr><td colspan="5">Nenhuma nota encontrada.</td></tr>';
+  }catch(e){
+    corpo.innerHTML = '<tr><td colspan="5">Erro: '+escapar(e.message)+'</td></tr>';
+  }
+}
+carregarNotas();
+</script>
+</body>
+</html>`);
+});
+
+// ================= FIM DO MÓDULO TEMPORÁRIO DE CONFERÊNCIA FISCAL =================
+
 // ================= CANCELAMENTO NFC-E =================
 //
 // Preparado para cancelamento por evento 110111.
