@@ -20,6 +20,7 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 10000;
 const BASE_URL = process.env.BASE_URL || "https://bela-caixa-api.onrender.com";
 const LOGO_URL = process.env.LOGO_URL || "";
 const API_BELA_SHEETS = process.env.API_BELA_SHEETS || "";
+const BELA_ADMIN_TOKEN = String(process.env.BELA_ADMIN_TOKEN || "").trim();
 
 const DATA_DIR = path.resolve("./storage");
 const NOTAS_DIR = path.join(DATA_DIR, "notas");
@@ -2021,127 +2022,317 @@ button{border:none;background:#111;color:#fff;padding:8px 12px;border-radius:6px
 
 // ================= HELPERS DE EXPORTAÇÃO =================
 
-async function obterArquivosXmlMes(mes) {
-  let arquivos = [];
+function extrairAmbienteXmlContabilidade(xml = "") {
+  return String(
+    String(xml || "").match(/<tpAmb>\s*([12])\s*<\/tpAmb>/i)?.[1] || ""
+  );
+}
 
-  // 1) tenta XML completo salvo
+function extrairProtocoloAutorizacaoXmlContabilidade(xml = "") {
+  const texto = String(xml || "");
+  const blocoProt = texto.match(/<protNFe\b[\s\S]*?<\/protNFe>/i)?.[0] || "";
+
+  return {
+    cStat: String(
+      blocoProt.match(/<cStat>\s*(\d+)\s*<\/cStat>/i)?.[1] || ""
+    ),
+    nProt: String(
+      blocoProt.match(/<nProt>\s*([^<]+)\s*<\/nProt>/i)?.[1] || ""
+    ),
+    tpAmb: String(
+      blocoProt.match(/<tpAmb>\s*([12])\s*<\/tpAmb>/i)?.[1] || ""
+    )
+  };
+}
+
+async function confirmarAutorizacaoProducaoParaRelatorio(nota = {}, xml = "") {
+  const chave = somenteDigitos(
+    extrairIdentificacaoXmlNfce(xml).chave ||
+    nota.chaveAcesso ||
+    nota.chave ||
+    ""
+  );
+
+  if (chave.length !== 44) {
+    return {
+      incluir: false,
+      motivo: "chave_invalida",
+      chave
+    };
+  }
+
+  const ambienteXml = extrairAmbienteXmlContabilidade(xml);
+  const protocoloXml = extrairProtocoloAutorizacaoXmlContabilidade(xml);
+
+  // XML processado completo já comprova autorização em produção.
+  if (
+    ambienteXml === "1" &&
+    protocoloXml.tpAmb === "1" &&
+    protocoloXml.cStat === "100" &&
+    protocoloXml.nProt
+  ) {
+    return {
+      incluir: true,
+      origemConfirmacao: "xml_processado",
+      chave,
+      protocolo: protocoloXml.nProt
+    };
+  }
+
+  // Quando o XML salvo ainda não contém nfeProc/protNFe, pergunta à SEFAZ.
+  try {
+    const oficial = await consultarChaveConferenciaFiscal({
+      chave,
+      ambiente: "1"
+    });
+
+    const incluir =
+      oficial.ambienteConsultado === "1" &&
+      oficial.tpAmb === "1" &&
+      oficial.classificacao?.codigo === "autorizada" &&
+      String(oficial.autorizacao?.cStat || oficial.cStat || "") === "100" &&
+      !!oficial.autorizacao?.nProt;
+
+    return {
+      incluir,
+      origemConfirmacao: "sefaz",
+      chave,
+      protocolo: oficial.autorizacao?.nProt || "",
+      cStat: oficial.cStat || "",
+      xMotivo: oficial.xMotivo || "",
+      oficial
+    };
+  } catch (e) {
+    return {
+      incluir: false,
+      motivo: "falha_consulta_sefaz",
+      chave,
+      erro: e.message
+    };
+  }
+}
+
+async function filtrarArquivosContabilidade(candidatos = []) {
+  const aprovados = [];
+  const excluidos = [];
+
+  for (const candidato of candidatos) {
+    const confirmacao = await confirmarAutorizacaoProducaoParaRelatorio(
+      candidato.nota || {},
+      candidato.data || ""
+    );
+
+    if (confirmacao.incluir) {
+      aprovados.push({
+        name: candidato.name,
+        data: candidato.data,
+        date: candidato.date
+      });
+    } else {
+      excluidos.push({
+        name: candidato.name,
+        chave: confirmacao.chave || "",
+        motivo: confirmacao.motivo || confirmacao.xMotivo || "não autorizada em produção"
+      });
+    }
+  }
+
+  console.log(
+    `[XML CONTABILIDADE] ${aprovados.length} autorizado(s) em produção | ` +
+    `${excluidos.length} excluído(s).`
+  );
+
+  excluidos.forEach(item => {
+    console.log(
+      `[XML CONTABILIDADE] Excluído ${item.name} | ${item.chave} | ${item.motivo}`
+    );
+  });
+
+  return aprovados;
+}
+
+async function obterArquivosXmlMes(mes) {
+  const candidatos = [];
+  const chavesExistentes = new Set();
+
+  // 1) XML persistido no Apps Script.
   try {
     if (API_BELA_SHEETS) {
       const rows = await listarXmlMesRemoto(mes);
-      arquivos = rows
-        .filter(r => String(r.xml || "").trim() !== "")
-        .map(r => ({
+
+      for (const r of rows) {
+        const xml = String(r.xml || "").trim();
+        if (!xml) continue;
+
+        const identificacao = extrairIdentificacaoXmlNfce(xml);
+        const chave = somenteDigitos(identificacao.chave || r.chave || "");
+        if (chave && chavesExistentes.has(chave)) continue;
+
+        candidatos.push({
           name: nomeArquivoXMLRegistro(r),
-          data: String(r.xml),
-          date: r.dataEmissao || new Date().toISOString()
-        }));
+          data: xml,
+          date: r.dataEmissao || new Date().toISOString(),
+          nota: {
+            ...r,
+            chave: chave || r.chave || ""
+          }
+        });
+
+        if (chave) chavesExistentes.add(chave);
+      }
     }
   } catch (e) {
     console.error("⚠ falha ao buscar XML do mês no Apps Script:", e.message);
   }
 
-  // 2) fallback remoto: recria XML a partir de nfce_notas
+  // 2) Completa dados ausentes por nfce_notas, sem incluir rejeitadas por suposição.
   try {
     if (API_BELA_SHEETS) {
       const notas = await listarNfceNotasRemotas({ mes });
-      const existentes = new Set(arquivos.map(a => a.name));
 
       for (const n of notas) {
-        const id = n.id;
-        if (!id) continue;
+        if (!n.id) continue;
 
-        const notaCompleta = await getNfceNotaRemota(id);
+        const notaCompleta = await getNfceNotaRemota(n.id);
         if (!notaCompleta) continue;
 
-        const xmlGerado = gerarXML(notaCompleta);
-        const nome = nomeArquivoXML(notaCompleta, xmlGerado);
-        if (existentes.has(nome)) continue;
+        const xmlPersistido =
+          extrairXmlPersistidoConferencia(notaCompleta) ||
+          notaCompleta.xml ||
+          "";
 
-        arquivos.push({
-          name: nome,
-          data: xmlGerado,
-          date: notaCompleta.dataEmissaoIso || notaCompleta.data || new Date().toISOString()
+        const xml = String(xmlPersistido || "").trim();
+        if (!xml) continue;
+
+        const identificacao = extrairIdentificacaoXmlNfce(xml);
+        const chave = somenteDigitos(
+          identificacao.chave ||
+          notaCompleta.chaveAcesso ||
+          notaCompleta.chave ||
+          ""
+        );
+
+        if (chave && chavesExistentes.has(chave)) continue;
+
+        candidatos.push({
+          name: nomeArquivoXML(notaCompleta, xml),
+          data: xml,
+          date: notaCompleta.dataEmissaoIso || notaCompleta.data || new Date().toISOString(),
+          nota: notaCompleta
         });
-        existentes.add(nome);
+
+        if (chave) chavesExistentes.add(chave);
       }
     }
   } catch (e) {
-    console.error("⚠ falha ao recriar XML do mês via nfce_notas:", e.message);
+    console.error("⚠ falha ao completar XML do mês via nfce_notas:", e.message);
   }
 
-  // 3) último fallback local
-  if (!arquivos.length) {
+  // 3) Fallback local apenas quando não há registros remotos.
+  if (!candidatos.length) {
     const lista = (await listarNotasLocal()).filter(n => n.mesRef === mes);
 
-    arquivos = lista.map(n => {
-      const xmlGerado = gerarXML(n);
-      return {
-        name: nomeArquivoXML(n, xmlGerado),
-        data: xmlGerado,
-        date: n.dataEmissaoIso || n.data || new Date().toISOString()
-      };
-    });
+    for (const nota of lista) {
+      const xml =
+        extrairXmlPersistidoConferencia(nota) ||
+        nota.xml ||
+        "";
+
+      if (!String(xml).trim()) continue;
+
+      candidatos.push({
+        name: nomeArquivoXML(nota, xml),
+        data: String(xml),
+        date: nota.dataEmissaoIso || nota.data || new Date().toISOString(),
+        nota
+      });
+    }
   }
 
-  return arquivos;
+  return await filtrarArquivosContabilidade(candidatos);
 }
 
 async function obterArquivosXmlPeriodo(inicio, fim) {
-  let arquivos = [];
+  const candidatos = [];
+  const chavesExistentes = new Set();
+  const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
+  const dFim = fim ? new Date(fim + "T23:59:59") : null;
 
-  // 1) tenta XML completo salvo
   try {
     if (API_BELA_SHEETS) {
       const rows = await listarXmlPeriodoRemoto(inicio, fim);
-      arquivos = rows
-        .filter(r => String(r.xml || "").trim() !== "")
-        .map(r => ({
+
+      for (const r of rows) {
+        const xml = String(r.xml || "").trim();
+        if (!xml) continue;
+
+        const identificacao = extrairIdentificacaoXmlNfce(xml);
+        const chave = somenteDigitos(identificacao.chave || r.chave || "");
+        if (chave && chavesExistentes.has(chave)) continue;
+
+        candidatos.push({
           name: nomeArquivoXMLRegistro(r),
-          data: String(r.xml),
-          date: r.dataEmissao || new Date().toISOString()
-        }));
+          data: xml,
+          date: r.dataEmissao || new Date().toISOString(),
+          nota: {
+            ...r,
+            chave: chave || r.chave || ""
+          }
+        });
+
+        if (chave) chavesExistentes.add(chave);
+      }
     }
   } catch (e) {
     console.error("⚠ falha ao buscar XML do período no Apps Script:", e.message);
   }
 
-  // 2) fallback remoto: recria XML a partir de nfce_notas
   try {
     if (API_BELA_SHEETS) {
       const notas = await listarNfceNotasRemotas({});
-      const existentes = new Set(arquivos.map(a => a.name));
-      const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
-      const dFim = fim ? new Date(fim + "T23:59:59") : null;
 
       for (const n of notas) {
         const notaDate = new Date(n.data || "");
         if (dIni && notaDate < dIni) continue;
         if (dFim && notaDate > dFim) continue;
+        if (!n.id) continue;
 
         const notaCompleta = await getNfceNotaRemota(n.id);
         if (!notaCompleta) continue;
 
-        const xmlGerado = gerarXML(notaCompleta);
-        const nome = nomeArquivoXML(notaCompleta, xmlGerado);
-        if (existentes.has(nome)) continue;
+        const xmlPersistido =
+          extrairXmlPersistidoConferencia(notaCompleta) ||
+          notaCompleta.xml ||
+          "";
 
-        arquivos.push({
-          name: nome,
-          data: xmlGerado,
-          date: notaCompleta.dataEmissaoIso || notaCompleta.data || new Date().toISOString()
+        const xml = String(xmlPersistido || "").trim();
+        if (!xml) continue;
+
+        const identificacao = extrairIdentificacaoXmlNfce(xml);
+        const chave = somenteDigitos(
+          identificacao.chave ||
+          notaCompleta.chaveAcesso ||
+          notaCompleta.chave ||
+          ""
+        );
+
+        if (chave && chavesExistentes.has(chave)) continue;
+
+        candidatos.push({
+          name: nomeArquivoXML(notaCompleta, xml),
+          data: xml,
+          date: notaCompleta.dataEmissaoIso || notaCompleta.data || new Date().toISOString(),
+          nota: notaCompleta
         });
-        existentes.add(nome);
+
+        if (chave) chavesExistentes.add(chave);
       }
     }
   } catch (e) {
-    console.error("⚠ falha ao recriar XML do período via nfce_notas:", e.message);
+    console.error("⚠ falha ao completar XML do período via nfce_notas:", e.message);
   }
 
-  // 3) último fallback local
-  if (!arquivos.length) {
-    const dIni = inicio ? new Date(inicio + "T00:00:00") : null;
-    const dFim = fim ? new Date(fim + "T23:59:59") : null;
-
+  if (!candidatos.length) {
     const lista = (await listarNotasLocal()).filter(n => {
       const d = new Date(n.dataEmissaoIso || n.data);
       if (dIni && d < dIni) return false;
@@ -2149,30 +2340,37 @@ async function obterArquivosXmlPeriodo(inicio, fim) {
       return true;
     });
 
-    arquivos = lista.map(n => {
-      const xmlGerado = gerarXML(n);
-      return {
-        name: nomeArquivoXML(n, xmlGerado),
-        data: xmlGerado,
-        date: n.dataEmissaoIso || n.data || new Date().toISOString()
-      };
-    });
+    for (const nota of lista) {
+      const xml =
+        extrairXmlPersistidoConferencia(nota) ||
+        nota.xml ||
+        "";
+
+      if (!String(xml).trim()) continue;
+
+      candidatos.push({
+        name: nomeArquivoXML(nota, xml),
+        data: String(xml),
+        date: nota.dataEmissaoIso || nota.data || new Date().toISOString(),
+        nota
+      });
+    }
   }
 
-  return arquivos;
+  return await filtrarArquivosContabilidade(candidatos);
 }
 
 async function responderZipMes(res, mes) {
   const files = await obterArquivosXmlMes(mes);
 
   if (!files.length) {
-    return res.status(404).json({ ok: false, error: "Nenhum XML encontrado para este mês." });
+    return res.status(404).json({ ok: false, error: "Nenhum XML oficialmente autorizado em produção foi encontrado para este mês." });
   }
 
   const zipBuffer = makeZip(files);
 
   res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${mes}.zip"`);
+  res.setHeader("Content-Disposition", `attachment; filename="XML_CONTABILIDADE_AUTORIZADAS_PRODUCAO_${mes}.zip"`);
   return res.send(zipBuffer);
 }
 
@@ -2180,14 +2378,14 @@ async function responderZipPeriodo(res, inicio, fim) {
   const files = await obterArquivosXmlPeriodo(inicio, fim);
 
   if (!files.length) {
-    return res.status(404).json({ ok: false, error: "Nenhum XML encontrado no período." });
+    return res.status(404).json({ ok: false, error: "Nenhum XML oficialmente autorizado em produção foi encontrado no período." });
   }
 
   const zipBuffer = makeZip(files);
   const nome = `${inicio || "inicio"}_${fim || "fim"}`.replace(/\//g, "-");
 
   res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="xml_nfce_${nome}.zip"`);
+  res.setHeader("Content-Disposition", `attachment; filename="XML_CONTABILIDADE_AUTORIZADAS_PRODUCAO_${nome}.zip"`);
   return res.send(zipBuffer);
 }
 
@@ -2730,8 +2928,40 @@ async function consultarSituacaoNfceSefaz(nota = {}) {
 }
 
 
+function obterTokenAdministrativo(req) {
+  const cabecalho = String(req.headers["x-bela-admin-token"] || "").trim();
+  const bearer = String(req.headers.authorization || "").match(/^Bearer\s+(.+)$/i)?.[1] || "";
+  const query = String(req.query?.token || "").trim();
+  const corpo = String(req.body?.adminToken || "").trim();
+  return cabecalho || bearer || query || corpo;
+}
+
+function protegerModuloConferencia(req, res, next) {
+  // Compatibilidade: sem BELA_ADMIN_TOKEN, o módulo continua funcionando
+  // como antes. O Render registra um aviso para lembrar que a proteção está
+  // disponível e ainda não foi ativada.
+  if (!BELA_ADMIN_TOKEN) return next();
+
+  const recebido = obterTokenAdministrativo(req);
+  const esperado = Buffer.from(BELA_ADMIN_TOKEN);
+  const informado = Buffer.from(recebido);
+
+  const valido =
+    esperado.length === informado.length &&
+    crypto.timingSafeEqual(esperado, informado);
+
+  if (!valido) {
+    return res.status(401).json({
+      ok: false,
+      error: "Token administrativo inválido ou não informado."
+    });
+  }
+
+  return next();
+}
+
 // ============================================================
-// MÓDULO TEMPORÁRIO DE CONFERÊNCIA FISCAL
+// MÓDULO DE CONFERÊNCIA FISCAL OFICIAL
 // Somente leitura. Não altera nota, venda, numeração ou status.
 // Para remover no futuro, apague este bloco inteiro.
 // ============================================================
@@ -2927,6 +3157,7 @@ async function consultarChaveConferenciaFiscal({ chave, ambiente }) {
     consultaUrl,
     chave: dados.chNFe || chaveLimpa,
     classificacao,
+    xmlRetorno: resposta.body,
     ...dados
   };
 }
@@ -2961,7 +3192,7 @@ function resumirNotaConferencia(nota = {}) {
   };
 }
 
-app.get("/conferencia-fiscal/notas", async (req, res) => {
+app.get("/conferencia-fiscal/notas", protegerModuloConferencia, async (req, res) => {
   try {
     const dia = String(req.query.dia || "");
     const mes = String(req.query.mes || "");
@@ -2993,7 +3224,7 @@ app.get("/conferencia-fiscal/notas", async (req, res) => {
   }
 });
 
-app.post("/conferencia-fiscal/consultar", async (req, res) => {
+app.post("/conferencia-fiscal/consultar", protegerModuloConferencia, async (req, res) => {
   try {
     const id = String(req.body?.id || "").trim();
     const chaveInformada = somenteDigitos(req.body?.chave || "");
@@ -3103,7 +3334,7 @@ app.post("/conferencia-fiscal/consultar", async (req, res) => {
   }
 });
 
-app.post("/conferencia-fiscal/sincronizar-cancelamento", async (req, res) => {
+app.post("/conferencia-fiscal/sincronizar-cancelamento", protegerModuloConferencia, async (req, res) => {
   try {
     const id = String(req.body?.id || "").trim();
 
@@ -3221,7 +3452,7 @@ app.post("/conferencia-fiscal/sincronizar-cancelamento", async (req, res) => {
   }
 });
 
-app.get("/conferencia-fiscal", (req, res) => {
+app.get("/conferencia-fiscal", protegerModuloConferencia, (req, res) => {
   res.type("html").send(`<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -3236,7 +3467,7 @@ app.get("/conferencia-fiscal", (req, res) => {
     h1{margin:0 0 6px;font-size:25px}
     h2{font-size:17px;margin:0 0 12px}
     .sub{color:#5f6368;margin-bottom:18px}
-    .grid{display:grid;grid-template-columns:1fr 2fr 180px auto;gap:10px}
+    .grid{display:grid;grid-template-columns:1fr 2fr 1.2fr 180px auto;gap:10px}
     input,select,button{padding:11px 12px;border-radius:9px;border:1px solid #c9ccd5;font-size:14px}
     button{background:#1a5276;color:#fff;border:0;font-weight:700;cursor:pointer}
     button:hover{filter:brightness(1.08)}
@@ -3265,10 +3496,11 @@ app.get("/conferencia-fiscal", (req, res) => {
 <div class="wrap">
   <div class="card">
     <h1>🔎 Conferência Fiscal NFC-e</h1>
-    <div class="sub">Consulta oficial na SEFAZ. Este painel é somente leitura e não altera nenhuma nota.</div>
+    <div class="sub">Consulta oficial na SEFAZ. A consulta é somente leitura. A sincronização da planilha só ocorre por ação manual e após confirmação oficial da SEFAZ.</div>
     <div class="grid">
       <input id="idNota" placeholder="ID da nota ou venda">
       <input id="chave" maxlength="44" placeholder="Ou chave de acesso com 44 dígitos">
+      <input id="adminToken" type="password" placeholder="Token administrativo (se configurado)">
       <select id="ambiente">
         <option value="auto">Detectar pelo XML</option>
         <option value="1">Produção</option>
@@ -3298,6 +3530,19 @@ app.get("/conferencia-fiscal", (req, res) => {
 <script>
 const resultado = document.getElementById("resultado");
 
+function headersAdministrativos(){
+  const token = document.getElementById("adminToken")?.value.trim() || "";
+  if (token) sessionStorage.setItem("belaAdminToken", token);
+  const salvo = token || sessionStorage.getItem("belaAdminToken") || "";
+  return salvo ? {"X-Bela-Admin-Token": salvo} : {};
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  const salvo = sessionStorage.getItem("belaAdminToken") || "";
+  const campo = document.getElementById("adminToken");
+  if (campo && salvo) campo.value = salvo;
+});
+
 function escapar(v){
   return String(v == null ? "" : v)
     .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
@@ -3313,7 +3558,7 @@ async function consultar(idForcado){
 
     const r = await fetch("/conferencia-fiscal/consultar",{
       method:"POST",
-      headers:{"Content-Type":"application/json"},
+      headers:{"Content-Type":"application/json", ...headersAdministrativos()},
       body:JSON.stringify({id,chave,ambiente})
     });
     const data = await r.json();
@@ -3374,7 +3619,7 @@ async function sincronizarCancelamento(){
   try {
     const r = await fetch("/conferencia-fiscal/sincronizar-cancelamento", {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: {"Content-Type":"application/json", ...headersAdministrativos()},
       body: JSON.stringify({ id })
     });
 
@@ -3397,7 +3642,7 @@ async function carregarNotas(){
   const corpo = document.getElementById("lista");
   corpo.innerHTML = '<tr><td colspan="5">Carregando...</td></tr>';
   try{
-    const r = await fetch("/conferencia-fiscal/notas");
+    const r = await fetch("/conferencia-fiscal/notas", { headers: headersAdministrativos() });
     const data = await r.json();
     const notas = data.notas || [];
     corpo.innerHTML = notas.map(n => {
@@ -3420,7 +3665,7 @@ carregarNotas();
 </html>`);
 });
 
-// ================= FIM DO MÓDULO TEMPORÁRIO DE CONFERÊNCIA FISCAL =================
+// ================= FIM DO MÓDULO DE CONFERÊNCIA FISCAL OFICIAL =================
 
 // ================= CANCELAMENTO NFC-E =================
 //
@@ -3944,14 +4189,43 @@ app.get("/nfce/:id", async (req, res) => {
 
 app.get("/nfce/:id/xml", async (req, res) => {
   const nota = await lerNotaCompleta(req.params.id);
-  if (!nota) return res.status(404).type("text/xml").send("<erro>Nota não encontrada</erro>");
 
-  const xmlOriginal = gerarXML(nota);
-  const assinatura = tentarAssinarXmlNFe(xmlOriginal);
-  const nomeArquivo = nomeArquivoXML(nota, assinatura.xml);
+  if (!nota) {
+    return res.status(404).type("application/xml")
+      .send("<erro>Nota não encontrada</erro>");
+  }
+
+  const xmlPersistido = extrairXmlPersistidoConferencia(nota);
+
+  if (xmlPersistido) {
+    const nomeArquivo = nomeArquivoXML(nota, xmlPersistido);
+    res.setHeader("Content-Disposition", `attachment; filename="${nomeArquivo}"`);
+    res.setHeader("X-Bela-Xml-Origem", "persistido");
+    return res.type("application/xml").send(xmlPersistido);
+  }
+
+  const autorizada =
+    String(nota.status || "").toLowerCase() === "autorizada" ||
+    String(nota.sefaz?.cStat || "") === "100" ||
+    !!(nota.protocolo || nota.sefaz?.nProt);
+
+  if (autorizada) {
+    return res.status(409).json({
+      ok: false,
+      error:
+        "A nota está autorizada, mas o XML transmitido não foi encontrado no armazenamento persistente. " +
+        "O servidor não irá regenerar um XML fiscal diferente do original."
+    });
+  }
+
+  // Apenas notas ainda não autorizadas podem gerar um rascunho técnico.
+  const xmlRascunho = tentarAssinarXmlNFe(gerarXML(nota)).xml;
+  const nomeArquivo = nomeArquivoXML(nota, xmlRascunho)
+    .replace(/\.xml$/i, "_RASCUNHO_NAO_AUTORIZADO.xml");
 
   res.setHeader("Content-Disposition", `attachment; filename="${nomeArquivo}"`);
-  res.type("application/xml").send(assinatura.xml);
+  res.setHeader("X-Bela-Xml-Origem", "rascunho-nao-autorizado");
+  return res.type("application/xml").send(xmlRascunho);
 });
 
 app.get("/nfce/:id/pdf", async (req, res) => {
@@ -4012,6 +4286,8 @@ const cancelamentosEmAndamento = new Set();
 
 app.post("/nfce/:id/cancelar", async (req, res) => {
   const idNota = String(req.params.id || "").trim();
+  let sincronizadoPlanilha = false;
+  let erroSincronizacaoPlanilha = "";
 
   if (cancelamentosEmAndamento.has(idNota)) {
     return res.status(409).json({
@@ -4130,13 +4406,17 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
       if (API_BELA_SHEETS) {
         try {
           await salvarCancelamentoNfceRemoto(nota, dadosCancelamento);
+          sincronizadoPlanilha = true;
         } catch (erroRemoto) {
+          erroSincronizacaoPlanilha = erroRemoto.message || "Falha desconhecida";
           console.error(
             "⚠ cancelamento autorizado pela SEFAZ, mas falhou ao gravar " +
             "nfce_cancelamentos e atualizar nfce_notas:",
-            erroRemoto.message
+            erroSincronizacaoPlanilha
           );
         }
+      } else {
+        erroSincronizacaoPlanilha = "API_BELA_SHEETS não configurada";
       }
     }
 
@@ -4156,7 +4436,13 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
       xMotivo: retorno.xMotivo,
       nProt: retorno.nProt,
       dhRegEvento: retorno.dhRegEvento,
-      httpStatus: retorno.httpStatus || null
+      httpStatus: retorno.httpStatus || null,
+      canceladoNaSefaz: !!retorno.cancelado,
+      sincronizadoNaPlanilha: retorno.cancelado ? sincronizadoPlanilha : false,
+      avisoSincronizacao:
+        retorno.cancelado && !sincronizadoPlanilha
+          ? `Cancelamento fiscal confirmado, mas a planilha não foi atualizada: ${erroSincronizacaoPlanilha}`
+          : ""
     };
 
     // Retorna sucesso HTTP somente quando a SEFAZ confirmou o cancelamento.
@@ -4313,6 +4599,7 @@ app.listen(PORT, () => {
       console.log(`Bela Caixa API rodando na porta ${PORT}`);
   console.log(`[NFC-e] Ambiente ${NFCE_CONFIG.tpAmb === "1" ? "PRODUÇÃO" : "HOMOLOGAÇÃO"} | XSD ativo | transmissão ${SEFAZ_CONFIG.habilitada ? "habilitada" : "desabilitada"} | autorização ${SEFAZ_CONFIG.autorizacaoUrl}.`);
       console.log(`Apps Script configurado: ${API_BELA_SHEETS ? "sim" : "não"}`);
+      console.log(`[SEGURANÇA] Conferência fiscal: ${BELA_ADMIN_TOKEN ? "protegida por token" : "sem token administrativo configurado"}.`);
     });
   })
   .catch(err => {
