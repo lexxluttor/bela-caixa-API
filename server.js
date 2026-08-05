@@ -2584,12 +2584,13 @@ function extrairConsultaProtocoloSefaz(xmlRetorno) {
   const eventos = [];
 
   for (let i = 0; i < todos.length; i++) {
-    if (nomeLocalXml(todos[i]) !== "procEventoNFe") continue;
+    const nome = nomeLocalXml(todos[i]);
+    if (nome !== "procEventoNFe" && nome !== "retEvento") continue;
 
     const infEvento = primeiroDescendenteXml(todos[i], "infEvento");
     if (!infEvento) continue;
 
-    eventos.push({
+    const evento = {
       cStat: textoFilhoDiretoXml(infEvento, "cStat"),
       xMotivo: textoFilhoDiretoXml(infEvento, "xMotivo"),
       chNFe: textoFilhoDiretoXml(infEvento, "chNFe"),
@@ -2598,26 +2599,46 @@ function extrairConsultaProtocoloSefaz(xmlRetorno) {
       nSeqEvento: textoFilhoDiretoXml(infEvento, "nSeqEvento"),
       nProt: textoFilhoDiretoXml(infEvento, "nProt"),
       dhRegEvento: textoFilhoDiretoXml(infEvento, "dhRegEvento")
-    });
+    };
+
+    const duplicado = eventos.some(item =>
+      item.tpEvento === evento.tpEvento &&
+      item.nSeqEvento === evento.nSeqEvento &&
+      item.nProt === evento.nProt
+    );
+
+    if (!duplicado) eventos.push(evento);
   }
+
+  const cStatConsulta = textoFilhoDiretoXml(retConsSitNFe, "cStat");
+  const xMotivoConsulta = textoFilhoDiretoXml(retConsSitNFe, "xMotivo");
 
   const cancelamentos = eventos.filter(evento =>
     evento.tpEvento === "110111" ||
     String(evento.xEvento || "").toUpperCase().includes("CANCEL")
   );
 
+  const canceladaPorEvento = cancelamentos.some(evento =>
+    evento.cStat === "135" ||
+    evento.cStat === "155" ||
+    !!evento.nProt ||
+    String(evento.xMotivo || "").toUpperCase().includes("REGISTRADO")
+  );
+
+  const canceladaPorSituacao =
+    cStatConsulta === "101" ||
+    String(xMotivoConsulta || "").toUpperCase().includes("CANCELAMENTO");
+
   return {
     tpAmb: textoFilhoDiretoXml(retConsSitNFe, "tpAmb"),
     verAplic: textoFilhoDiretoXml(retConsSitNFe, "verAplic"),
-    cStat: textoFilhoDiretoXml(retConsSitNFe, "cStat"),
-    xMotivo: textoFilhoDiretoXml(retConsSitNFe, "xMotivo"),
+    cStat: cStatConsulta,
+    xMotivo: xMotivoConsulta,
     chNFe: textoFilhoDiretoXml(retConsSitNFe, "chNFe"),
     autorizacao,
     eventos,
     cancelamentos,
-    cancelada: cancelamentos.some(evento =>
-      evento.cStat === "135" || evento.cStat === "155"
-    )
+    cancelada: canceladaPorEvento || canceladaPorSituacao
   };
 }
 
@@ -2777,8 +2798,14 @@ function classificarRespostaOficialConferencia(consulta = {}) {
   const autorizacao = consulta.autorizacao || null;
   const cStatAutorizacao = String(autorizacao?.cStat || "");
   const cStatConsulta = String(consulta.cStat || "");
+  const motivoConsulta = String(consulta.xMotivo || "").toUpperCase();
 
-  if (consulta.cancelada) {
+  // A situação atual da SEFAZ prevalece sobre a autorização original.
+  if (
+    consulta.cancelada ||
+    cStatConsulta === "101" ||
+    motivoConsulta.includes("CANCELAMENTO")
+  ) {
     return {
       codigo: "cancelada",
       rotulo: "CANCELADA",
@@ -2786,7 +2813,7 @@ function classificarRespostaOficialConferencia(consulta = {}) {
     };
   }
 
-  if (cStatAutorizacao === "100") {
+  if (cStatAutorizacao === "100" || cStatConsulta === "100") {
     return {
       codigo: "autorizada",
       rotulo: "AUTORIZADA",
@@ -2988,12 +3015,33 @@ app.post("/conferencia-fiscal/consultar", async (req, res) => {
       divergencias.push("O protocolo salvo diverge do protocolo retornado pela SEFAZ.");
     }
 
+    const protocoloCancelamento =
+      oficial.cancelamentos?.find(evento => evento.nProt)?.nProt || "";
+    const dataCancelamento =
+      oficial.cancelamentos?.find(evento => evento.dhRegEvento)?.dhRegEvento || "";
+
+    const resumoOficial = {
+      fonte: "SEFAZ MG - NFeConsultaProtocolo4",
+      ambiente: oficial.ambienteNome,
+      ambienteCodigo: oficial.tpAmb || oficial.ambienteConsultado,
+      situacao: oficial.classificacao.rotulo,
+      codigoSituacao: oficial.classificacao.codigo,
+      cStat: oficial.cStat,
+      xMotivo: oficial.xMotivo,
+      protocoloAutorizacao: oficial.autorizacao?.nProt || "",
+      dataAutorizacao: oficial.autorizacao?.dhRecbto || "",
+      protocoloCancelamento,
+      dataCancelamento,
+      cancelada: oficial.cancelada === true
+    };
+
     return res.json({
       ok: oficial.ok,
       somenteLeitura: true,
       alterouDados: false,
       nota: nota ? resumirNotaConferencia(nota) : null,
       ambienteDetectado: ambiente,
+      resumoOficial,
       oficial,
       divergencias: [...new Set(divergencias)]
     });
@@ -3027,6 +3075,17 @@ app.get("/conferencia-fiscal", (req, res) => {
     button{background:#1a5276;color:#fff;border:0;font-weight:700;cursor:pointer}
     button:hover{filter:brightness(1.08)}
     .resultado{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.45;background:#111827;color:#e5e7eb;padding:15px;border-radius:10px;min-height:90px;overflow:auto}
+    .oficial{display:none;border:2px solid #d8dbe3;border-radius:14px;padding:18px;background:#fff}
+    .oficial h3{margin:0 0 12px;font-size:20px}
+    .oficial-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .campo{background:#f6f7fa;border-radius:10px;padding:11px}
+    .campo small{display:block;color:#6b7280;text-transform:uppercase;font-size:10px;font-weight:700;margin-bottom:4px}
+    .campo strong{word-break:break-word}
+    .status-grande{font-size:22px;font-weight:900}
+    .ok-status{color:#137333}.cancel-status{color:#b3261e}.warn-status{color:#8a5a00}
+    details{margin-top:14px}
+    summary{cursor:pointer;font-weight:700;color:#1a5276}
+    @media(max-width:650px){.oficial-grid{grid-template-columns:1fr}}
     .badge{display:inline-block;padding:5px 9px;border-radius:999px;font-weight:700;font-size:12px}
     .prod{background:#d5f5e3;color:#176b36}.hom{background:#fff3cd;color:#7a5200}.erro{background:#fadbd8;color:#8b1e16}
     table{width:100%;border-collapse:collapse;font-size:13px}
@@ -3054,7 +3113,8 @@ app.get("/conferencia-fiscal", (req, res) => {
   </div>
 
   <div class="card">
-    <h2>Resposta oficial</h2>
+    <h2>Resposta oficial da SEFAZ</h2>
+    <div id="painelOficial" class="oficial"></div>
     <div id="resultado" class="resultado">Aguardando consulta...</div>
   </div>
 
@@ -3091,7 +3151,38 @@ async function consultar(idForcado){
     });
     const data = await r.json();
     resultado.textContent = JSON.stringify(data,null,2);
+
+    const painel = document.getElementById("painelOficial");
+    const resumo = data.resumoOficial;
+
+    if (!resumo) {
+      painel.style.display = "none";
+      return;
+    }
+
+    const classe =
+      resumo.codigoSituacao === "autorizada" ? "ok-status" :
+      resumo.codigoSituacao === "cancelada" ? "cancel-status" :
+      "warn-status";
+
+    painel.innerHTML =
+      '<h3>🏛️ Resposta oficial da SEFAZ MG</h3>'+ 
+      '<div class="oficial-grid">'+
+        '<div class="campo"><small>Situação atual</small><strong class="status-grande '+classe+'">'+escapar(resumo.situacao)+'</strong></div>'+ 
+        '<div class="campo"><small>Ambiente oficial</small><strong>'+escapar(resumo.ambiente)+' (tpAmb '+escapar(resumo.ambienteCodigo)+')</strong></div>'+ 
+        '<div class="campo"><small>cStat atual</small><strong>'+escapar(resumo.cStat)+'</strong></div>'+ 
+        '<div class="campo"><small>Motivo oficial</small><strong>'+escapar(resumo.xMotivo)+'</strong></div>'+ 
+        '<div class="campo"><small>Protocolo de autorização</small><strong>'+escapar(resumo.protocoloAutorizacao || "não informado")+'</strong></div>'+ 
+        '<div class="campo"><small>Data da autorização</small><strong>'+escapar(resumo.dataAutorizacao || "não informada")+'</strong></div>'+ 
+        '<div class="campo"><small>Protocolo de cancelamento</small><strong>'+escapar(resumo.protocoloCancelamento || "não se aplica")+'</strong></div>'+ 
+        '<div class="campo"><small>Data do cancelamento</small><strong>'+escapar(resumo.dataCancelamento || "não se aplica")+'</strong></div>'+ 
+      '</div>'+ 
+      '<details><summary>Ver resposta técnica completa</summary><p>O JSON técnico aparece no quadro escuro abaixo.</p></details>'+ 
+      '<p style="margin:14px 0 0;color:#5f6368"><strong>Fonte:</strong> '+escapar(resumo.fonte)+'</p>';
+
+    painel.style.display = "block";
   }catch(e){
+    document.getElementById("painelOficial").style.display = "none";
     resultado.textContent = "Erro: " + e.message;
   }
 }
