@@ -3883,6 +3883,66 @@ app.post("/nfce/:id/cancelar", async (req, res) => {
 
     await salvarCancelamentoLocal(nota, dadosCancelamento);
 
+    // Quando a SEFAZ confirma o evento, sincroniza também a linha principal
+    // de nfce_notas no Apps Script. A aba nfce_cancelamentos continua como
+    // histórico do evento, mas nfce_notas passa a refletir a situação atual.
+    if (retorno.cancelado) {
+      nota.status = "cancelada";
+      nota.status_nfce = "cancelada";
+      nota.protocolo_cancelamento = retorno.nProt || "";
+      nota.cancelada_em = retorno.dhRegEvento || new Date().toISOString();
+      nota.cancelamento = {
+        ...(nota.cancelamento || {}),
+        ...dadosCancelamento,
+        cancelado: true,
+        cStat: retorno.cStat,
+        xMotivo: retorno.xMotivo,
+        nProt: retorno.nProt,
+        dhRegEvento: retorno.dhRegEvento,
+        tpEvento: retorno.tpEvento || "110111",
+        nSeqEvento: retorno.nSeqEvento || "1"
+      };
+
+      // Mantém os dados da autorização original para auditoria.
+      nota.sefaz = {
+        ...(nota.sefaz || {}),
+        cancelada: true,
+        situacaoAtual: "cancelada",
+        cStatAtual: "101",
+        xMotivoAtual: "Cancelamento de NF-e homologado"
+      };
+
+      try {
+        await salvarNota(nota);
+      } catch (erroLocal) {
+        console.warn(
+          "⚠ cancelamento autorizado, mas falhou ao atualizar o cache local:",
+          erroLocal.message
+        );
+      }
+
+      if (API_BELA_SHEETS) {
+        try {
+          const xmlPersistido =
+            extrairXmlPersistidoConferencia(nota) ||
+            nota.xml ||
+            "";
+
+          await salvarXmlNfceRemoto(nota, xmlPersistido);
+
+          console.log(
+            `[NFC-e] Status cancelado sincronizado no Apps Script | ` +
+            `nota ${nota.numero} | protocolo ${retorno.nProt || ""}.`
+          );
+        } catch (erroRemoto) {
+          console.error(
+            "⚠ cancelamento autorizado pela SEFAZ, mas falhou ao atualizar nfce_notas:",
+            erroRemoto.message
+          );
+        }
+      }
+    }
+
     const respostaCancelamento = {
       ok: !!retorno.cancelado,
       transmitido: retorno.transmitido,
