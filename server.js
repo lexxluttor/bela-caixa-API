@@ -2989,6 +2989,7 @@ const conferenciaFiscal = registrarConferenciaFiscal({
   app,
   crypto,
   BELA_ADMIN_TOKEN,
+  protegerModuloConferencia,
   SEFAZ_CONFIG,
   SEFAZ_ENDPOINTS_MG,
   somenteDigitos,
