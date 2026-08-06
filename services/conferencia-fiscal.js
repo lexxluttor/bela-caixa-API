@@ -722,6 +722,7 @@ export function registrarConferenciaFiscal({
 
   // ================= FIM DO MÓDULO DE CONFERÊNCIA FISCAL OFICIAL =================
   return {
-    consultarChaveConferenciaFiscal
+    consultarChaveConferenciaFiscal,
+    extrairXmlPersistidoConferencia
   };
 }
