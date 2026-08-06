@@ -1,6 +1,7 @@
 export function registrarConferenciaFiscal({
   app,
   crypto,
+  API_BELA_SHEETS,
   BELA_ADMIN_TOKEN,
   protegerModuloConferencia,
   SEFAZ_CONFIG,
@@ -15,6 +16,18 @@ export function registrarConferenciaFiscal({
   salvarCancelamentoNfceRemoto,
   extrairIdentificacaoXmlNfce
 }) {
+  if (typeof listarNfceNotasRemotas !== "function") {
+    throw new Error(
+      "Conferência Fiscal: listarNfceNotasRemotas não foi fornecida."
+    );
+  }
+
+  if (typeof listarNotasLocal !== "function") {
+    throw new Error(
+      "Conferência Fiscal: listarNotasLocal não foi fornecida."
+    );
+  }
+
   // ============================================================
   // MÓDULO DE CONFERÊNCIA FISCAL OFICIAL
   // Somente leitura. Não altera nota, venda, numeração ou status.
@@ -699,6 +712,11 @@ export function registrarConferenciaFiscal({
     try{
       const r = await fetch("/conferencia-fiscal/notas", { headers: headersAdministrativos() });
       const data = await r.json();
+
+      if (!r.ok || !data.ok) {
+        throw new Error(data.error || "Falha ao carregar as notas.");
+      }
+
       const notas = data.notas || [];
       corpo.innerHTML = notas.map(n => {
         const classe = n.ambiente === "1" ? "prod" : n.ambiente === "2" ? "hom" : "erro";
