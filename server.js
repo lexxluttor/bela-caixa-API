@@ -2511,6 +2511,14 @@ const conferenciaFiscal = registrarConferenciaFiscal({
 consultarSituacaoFiscalOficial =
   conferenciaFiscal.consultarChaveConferenciaFiscal;
 
+if (
+  typeof consultarSituacaoFiscalOficial !== "function" ||
+  typeof conferenciaFiscal.extrairXmlPersistidoConferencia !== "function"
+) {
+  throw new Error(
+    "Contrato entre Conferência Fiscal e Relatório XML não foi inicializado."
+  );
+}
 
 registrarXmlContabilidade({
   app,
@@ -2523,7 +2531,8 @@ registrarXmlContabilidade({
   listarXmlPeriodoRemoto,
   listarNfceNotasRemotas,
   getNfceNotaRemota,
-  extrairXmlPersistidoConferencia,
+  extrairXmlPersistidoConferencia:
+    conferenciaFiscal.extrairXmlPersistidoConferencia,
   listarNotasLocal,
   consultarSituacaoFiscalOficial
 });
