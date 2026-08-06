@@ -2493,6 +2493,7 @@ function protegerModuloConferencia(req, res, next) {
 const conferenciaFiscal = registrarConferenciaFiscal({
   app,
   crypto,
+  API_BELA_SHEETS,
   BELA_ADMIN_TOKEN,
   protegerModuloConferencia,
   SEFAZ_CONFIG,
