@@ -22,6 +22,7 @@ const BASE_URL = process.env.BASE_URL || "https://bela-caixa-api.onrender.com";
 const LOGO_URL = process.env.LOGO_URL || "";
 const API_BELA_SHEETS = process.env.API_BELA_SHEETS || "";
 const BELA_ADMIN_TOKEN = String(process.env.BELA_ADMIN_TOKEN || "").trim();
+let consultarSituacaoFiscalOficial = null;
 
 const DATA_DIR = path.resolve("./storage");
 const NOTAS_DIR = path.join(DATA_DIR, "notas");
@@ -2078,7 +2079,14 @@ async function confirmarAutorizacaoProducaoParaRelatorio(nota = {}, xml = "") {
   }
 
   try {
-    const oficial = await consultarChaveConferenciaFiscal({
+    if (typeof consultarSituacaoFiscalOficial !== "function") {
+      throw new Error(
+        "Módulo de conferência fiscal não inicializado. " +
+        "O XML foi excluído por segurança."
+      );
+    }
+
+    const oficial = await consultarSituacaoFiscalOficial({
       chave,
       ambiente: "1"
     });
@@ -2977,7 +2985,7 @@ function protegerModuloConferencia(req, res, next) {
 // Conferência fiscal registrada pelo módulo externo.
 
 
-registrarConferenciaFiscal({
+const conferenciaFiscal = registrarConferenciaFiscal({
   app,
   crypto,
   BELA_ADMIN_TOKEN,
@@ -2993,6 +3001,9 @@ registrarConferenciaFiscal({
   salvarCancelamentoNfceRemoto,
   extrairIdentificacaoXmlNfce
 });
+
+consultarSituacaoFiscalOficial =
+  conferenciaFiscal.consultarChaveConferenciaFiscal;
 
 // ================= CANCELAMENTO NFC-E =================
 //
@@ -3927,6 +3938,10 @@ app.listen(PORT, () => {
   console.log(`[NFC-e] Ambiente ${NFCE_CONFIG.tpAmb === "1" ? "PRODUÇÃO" : "HOMOLOGAÇÃO"} | XSD ativo | transmissão ${SEFAZ_CONFIG.habilitada ? "habilitada" : "desabilitada"} | autorização ${SEFAZ_CONFIG.autorizacaoUrl}.`);
       console.log(`Apps Script configurado: ${API_BELA_SHEETS ? "sim" : "não"}`);
       console.log(`[SEGURANÇA] Conferência fiscal: ${BELA_ADMIN_TOKEN ? "protegida por token" : "sem token administrativo configurado"}.`);
+      console.log(
+        `[XML CONTABILIDADE] Consulta oficial compartilhada: ` +
+        `${typeof consultarSituacaoFiscalOficial === "function" ? "ativa" : "INATIVA"}`
+      );
     });
   })
   .catch(err => {
