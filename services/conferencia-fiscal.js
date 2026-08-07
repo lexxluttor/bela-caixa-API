@@ -13,6 +13,7 @@ export function registrarConferenciaFiscal({
   listarNotasLocal,
   lerNotaCompleta,
   salvarNota,
+  salvarXmlNfceRemoto,
   salvarCancelamentoNfceRemoto,
   extrairIdentificacaoXmlNfce
 }) {
@@ -25,6 +26,12 @@ export function registrarConferenciaFiscal({
   if (typeof listarNotasLocal !== "function") {
     throw new Error(
       "Conferência Fiscal: listarNotasLocal não foi fornecida."
+    );
+  }
+
+  if (typeof salvarXmlNfceRemoto !== "function") {
+    throw new Error(
+      "Conferência Fiscal: salvarXmlNfceRemoto não foi fornecida."
     );
   }
 
@@ -345,12 +352,17 @@ export function registrarConferenciaFiscal({
 
       const divergencias = [...ambiente.divergencias];
 
-      if (
-        statusInterno.toLowerCase().includes("autoriz") &&
-        statusOficial !== "autorizada"
-      ) {
+      const internoAutorizado = statusInterno.toLowerCase().includes("autoriz");
+
+      if (internoAutorizado && statusOficial !== "autorizada") {
         divergencias.push(
           `O sistema informa "${statusInterno}", mas a SEFAZ respondeu "${oficial.classificacao.rotulo}".`
+        );
+      }
+
+      if (!internoAutorizado && statusOficial === "autorizada") {
+        divergencias.push(
+          `O sistema informa "${statusInterno || "sem status"}", mas a SEFAZ confirmou AUTORIZADA.`
         );
       }
 
@@ -398,6 +410,130 @@ export function registrarConferenciaFiscal({
         somenteLeitura: true,
         alterouDados: false,
         error: e.message || "Falha na conferência fiscal."
+      });
+    }
+  });
+
+  app.post("/conferencia-fiscal/sincronizar-autorizacao", protegerModuloConferencia, async (req, res) => {
+    try {
+      const id = String(req.body?.id || "").trim();
+
+      if (!id) {
+        return res.status(400).json({
+          ok: false,
+          error: "Informe o ID da nota para sincronizar."
+        });
+      }
+
+      const nota = await lerNotaCompleta(id);
+      if (!nota) {
+        return res.status(404).json({
+          ok: false,
+          error: "Nota não encontrada."
+        });
+      }
+
+      const xml = extrairXmlPersistidoConferencia(nota);
+      const identificacao = extrairIdentificacaoXmlNfce(xml);
+      const chave = somenteDigitos(
+        identificacao.chave ||
+        nota.chaveAcesso ||
+        nota.chave ||
+        ""
+      );
+
+      if (chave.length !== 44) {
+        return res.status(409).json({
+          ok: false,
+          sincronizado: false,
+          error: "A nota não possui chave válida de 44 dígitos."
+        });
+      }
+
+      const ambiente = identificarAmbienteConferencia({
+        nota,
+        xml,
+        ambienteInformado: "auto"
+      });
+
+      const oficial = await consultarChaveConferenciaFiscal({
+        chave,
+        ambiente: ambiente.ambiente
+      });
+
+      const protocolo = String(oficial.autorizacao?.nProt || "").trim();
+      const autorizada =
+        oficial.classificacao?.codigo === "autorizada" &&
+        String(oficial.autorizacao?.cStat || oficial.cStat || "") === "100" &&
+        !!protocolo;
+
+      if (!autorizada) {
+        return res.status(409).json({
+          ok: false,
+          sincronizado: false,
+          error: "A SEFAZ não confirmou autorização desta NFC-e.",
+          oficial
+        });
+      }
+
+      nota.status = "autorizada";
+      nota.status_nfce = "autorizada";
+      nota.protocolo = protocolo;
+      nota.chaveAcesso = chave;
+      nota.chave = chave;
+      nota.sefaz = {
+        ...(nota.sefaz || {}),
+        transmitido: true,
+        autorizado: true,
+        cStat: "100",
+        xMotivo: oficial.autorizacao?.xMotivo || oficial.xMotivo || "Autorizado o uso da NF-e",
+        nProt: protocolo,
+        dhRecbto: oficial.autorizacao?.dhRecbto || "",
+        tpAmb: oficial.tpAmb || oficial.ambienteConsultado || ambiente.ambiente
+      };
+
+      if (xml && !nota.xml_autorizado) {
+        nota.xml_autorizado = xml;
+      }
+
+      await salvarNota(nota);
+
+      let sincronizadoAppsScript = false;
+      let aviso = "";
+
+      if (xml) {
+        try {
+          await salvarXmlNfceRemoto(nota, xml);
+          sincronizadoAppsScript = true;
+        } catch (erroRemoto) {
+          aviso = `Autorização confirmada e cache local corrigido, mas o Apps Script não foi atualizado: ${erroRemoto.message}`;
+        }
+      } else {
+        aviso = "Autorização confirmada e cache local corrigido, mas o XML persistido não foi encontrado para atualizar o Apps Script com segurança.";
+      }
+
+      return res.json({
+        ok: true,
+        sincronizado: sincronizadoAppsScript,
+        alterouSefaz: false,
+        mensagem: sincronizadoAppsScript
+          ? "Status AUTORIZADA sincronizado com a planilha com base na resposta oficial da SEFAZ."
+          : "Status AUTORIZADA confirmado pela SEFAZ; houve ressalva na sincronização administrativa.",
+        aviso,
+        nota: {
+          id: nota.id,
+          numero: nota.numero,
+          chave,
+          status: nota.status,
+          protocolo
+        },
+        oficial
+      });
+    } catch (e) {
+      return res.status(400).json({
+        ok: false,
+        sincronizado: false,
+        error: e.message || "Falha ao sincronizar a autorização."
       });
     }
   });
@@ -661,11 +797,49 @@ export function registrarConferenciaFiscal({
         '<p style="margin:14px 0 0;color:#5f6368"><strong>Fonte:</strong> '+escapar(resumo.fonte)+'</p>'+
         (resumo.codigoSituacao === "cancelada"
           ? '<button style="margin-top:12px" onclick="sincronizarCancelamento()">Sincronizar cancelamento na planilha</button>'
-          : '');
+          : resumo.codigoSituacao === "autorizada" && data.nota && !String(data.nota.statusInterno || "").toLowerCase().includes("autoriz")
+            ? '<button style="margin-top:12px" onclick="sincronizarAutorizacao()">Sincronizar autorização na planilha</button>'
+            : '');
 
       painel.style.display = "block";
     }catch(e){
       document.getElementById("painelOficial").style.display = "none";
+      resultado.textContent = "Erro: " + e.message;
+    }
+  }
+
+  async function sincronizarAutorizacao(){
+    const id = document.getElementById("idNota").value.trim();
+
+    if (!id) {
+      alert("Informe ou selecione o ID da nota antes de sincronizar.");
+      return;
+    }
+
+    if (!confirm("Sincronizar o status AUTORIZADA na planilha com base na resposta oficial da SEFAZ? Nenhuma nota será reenviada.")) {
+      return;
+    }
+
+    resultado.textContent = "Sincronizando a autorização no Apps Script...";
+
+    try {
+      const r = await fetch("/conferencia-fiscal/sincronizar-autorizacao", {
+        method: "POST",
+        headers: {"Content-Type":"application/json", ...headersAdministrativos()},
+        body: JSON.stringify({ id })
+      });
+
+      const data = await r.json();
+      resultado.textContent = JSON.stringify(data, null, 2);
+
+      if (!r.ok || !data.ok) {
+        alert(data.error || "Não foi possível sincronizar a autorização.");
+        return;
+      }
+
+      alert(data.aviso || "Autorização sincronizada na planilha com sucesso.");
+      carregarNotas();
+    } catch (e) {
       resultado.textContent = "Erro: " + e.message;
     }
   }
