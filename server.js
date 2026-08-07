@@ -2505,6 +2505,7 @@ const conferenciaFiscal = registrarConferenciaFiscal({
   listarNotasLocal,
   lerNotaCompleta,
   salvarNota,
+  salvarXmlNfceRemoto,
   salvarCancelamentoNfceRemoto,
   extrairIdentificacaoXmlNfce
 });
@@ -3066,7 +3067,7 @@ app.get("/nfce/:id/xml", async (req, res) => {
       .send("<erro>Nota não encontrada</erro>");
   }
 
-  const xmlPersistido = extrairXmlPersistidoConferencia(nota);
+  const xmlPersistido = conferenciaFiscal.extrairXmlPersistidoConferencia(nota);
 
   if (xmlPersistido) {
     const nomeArquivo = nomeArquivoXML(nota, xmlPersistido);
