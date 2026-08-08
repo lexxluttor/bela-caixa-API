@@ -14,6 +14,7 @@ export function registrarConferenciaFiscal({
   lerNotaCompleta,
   salvarNota,
   salvarXmlNfceRemoto,
+  buscarXmlNfceRemoto = null,
   salvarCancelamentoNfceRemoto,
   extrairIdentificacaoXmlNfce
 }) {
@@ -59,6 +60,57 @@ export function registrarConferenciaFiscal({
         (valor.includes("<NFe") || valor.includes("<nfeProc"))
       ) || ""
     );
+  }
+
+
+  async function obterXmlAutorizadoConferencia(nota = {}) {
+    const local = extrairXmlPersistidoConferencia(nota);
+    if (local) return local;
+
+    if (typeof buscarXmlNfceRemoto === "function") {
+      try {
+        const resposta = await buscarXmlNfceRemoto({
+          id: nota.id || nota.vendaId || "",
+          vendaId: nota.vendaId || nota.id || "",
+          numero: nota.numero || "",
+          serie: nota.serie || 1
+        });
+
+        const candidatos = Array.isArray(resposta)
+          ? resposta
+          : Array.isArray(resposta?.rows)
+            ? resposta.rows
+            : Array.isArray(resposta?.xmls)
+              ? resposta.xmls
+              : resposta
+                ? [resposta]
+                : [];
+
+        for (const item of candidatos) {
+          const xml = String(
+            item?.xml ||
+            item?.xml_autorizado ||
+            item?.xmlAutorizado ||
+            ""
+          );
+
+          if (
+            xml &&
+            xml.includes("<") &&
+            (xml.includes("<NFe") || xml.includes("<nfeProc"))
+          ) {
+            return xml;
+          }
+        }
+      } catch (erro) {
+        console.warn(
+          "[CONFERÊNCIA FISCAL] Falha ao buscar XML persistido remoto:",
+          erro.message
+        );
+      }
+    }
+
+    return "";
   }
 
   function identificarAmbienteConferencia({ nota = {}, xml = "", ambienteInformado = "" } = {}) {
@@ -317,7 +369,7 @@ export function registrarConferenciaFiscal({
         }
       }
 
-      const xml = String(req.body?.xml || "") || extrairXmlPersistidoConferencia(nota || {});
+      const xml = String(req.body?.xml || "") || await obterXmlAutorizadoConferencia(nota || {});
       const identificacao = extrairIdentificacaoXmlNfce(xml);
       const chave = chaveInformada ||
         somenteDigitos(
@@ -351,6 +403,21 @@ export function registrarConferenciaFiscal({
       const statusOficial = oficial.classificacao.codigo;
 
       const divergencias = [...ambiente.divergencias];
+
+      if (identificacao.chave && nota) {
+        const chaveInterna = somenteDigitos(nota.chaveAcesso || nota.chave || "");
+        if (chaveInterna && chaveInterna !== somenteDigitos(identificacao.chave)) {
+          divergencias.push(
+            `A chave salva no sistema (${chaveInterna}) diverge da chave do XML autorizado (${somenteDigitos(identificacao.chave)}).`
+          );
+        }
+      }
+
+      if (identificacao.numero && nota?.numero && Number(identificacao.numero) !== Number(nota.numero)) {
+        divergencias.push(
+          `O número salvo no sistema (${nota.numero}) diverge do número do XML autorizado (${identificacao.numero}).`
+        );
+      }
 
       const internoAutorizado = statusInterno.toLowerCase().includes("autoriz");
 
@@ -433,7 +500,7 @@ export function registrarConferenciaFiscal({
         });
       }
 
-      const xml = extrairXmlPersistidoConferencia(nota);
+      const xml = await obterXmlAutorizadoConferencia(nota);
       const identificacao = extrairIdentificacaoXmlNfce(xml);
       const chave = somenteDigitos(
         identificacao.chave ||
@@ -479,8 +546,15 @@ export function registrarConferenciaFiscal({
       nota.status = "autorizada";
       nota.status_nfce = "autorizada";
       nota.protocolo = protocolo;
-      nota.chaveAcesso = chave;
-      nota.chave = chave;
+
+      const chaveXml = somenteDigitos(identificacao.chave || "");
+      const numeroXml = Number(identificacao.numero || 0);
+      const serieXml = Number(identificacao.serie || 0);
+
+      nota.chaveAcesso = chaveXml || chave;
+      nota.chave = chaveXml || chave;
+      if (numeroXml) nota.numero = numeroXml;
+      if (serieXml) nota.serie = serieXml;
       nota.sefaz = {
         ...(nota.sefaz || {}),
         transmitido: true,
@@ -523,7 +597,7 @@ export function registrarConferenciaFiscal({
         nota: {
           id: nota.id,
           numero: nota.numero,
-          chave,
+          chave: nota.chaveAcesso || nota.chave || chave,
           status: nota.status,
           protocolo
         },
@@ -558,7 +632,7 @@ export function registrarConferenciaFiscal({
         });
       }
 
-      const xml = extrairXmlPersistidoConferencia(nota);
+      const xml = await obterXmlAutorizadoConferencia(nota);
       const identificacao = extrairIdentificacaoXmlNfce(xml);
       const chave = somenteDigitos(
         identificacao.chave ||
@@ -915,6 +989,7 @@ export function registrarConferenciaFiscal({
   // ================= FIM DO MÓDULO DE CONFERÊNCIA FISCAL OFICIAL =================
   return {
     consultarChaveConferenciaFiscal,
-    extrairXmlPersistidoConferencia
+    extrairXmlPersistidoConferencia,
+    obterXmlAutorizadoConferencia
   };
 }
