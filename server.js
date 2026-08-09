@@ -335,6 +335,20 @@ const CSC_CONFIG = {
 };
 
 let sequencial = 1;
+let filaReservaNumeroNfce = Promise.resolve();
+
+async function comTravaLocalNumeroNfce(fn) {
+  const anterior = filaReservaNumeroNfce;
+  let liberar;
+  filaReservaNumeroNfce = new Promise(resolve => { liberar = resolve; });
+
+  await anterior;
+  try {
+    return await fn();
+  } finally {
+    liberar();
+  }
+}
 
 // ================= AUXILIARES =================
 
@@ -1082,34 +1096,93 @@ async function obterNumeroNfceRemoto() {
   };
 }
 
-async function obterNumeroNfceSeguro() {
-  const reservado = await obterNumeroNfceRemoto();
-  let maiorRegistrado = 0;
+async function reservarNumeroNfceRemoto(minimo = 0) {
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
+
+  const data = await fetchJson(API_BELA_SHEETS, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "reservarNumeroNfce",
+      minimo: Number(minimo || 0)
+    })
+  });
+
+  return {
+    numero: toNumber(data.numero, 1),
+    serie: toNumber(data.serie, 1),
+    proximoNumero: toNumber(data.proximoNumero, 0),
+    maiorRegistrado: toNumber(data.maiorRegistrado, 0)
+  };
+}
+
+async function obterNumeroNfceSeguro(minimo = 0) {
+  return await comTravaLocalNumeroNfce(async () => {
+    try {
+      const reservado = await reservarNumeroNfceRemoto(minimo);
+
+      console.log(
+        `[NFC-e] Número reservado atomicamente: ${reservado.numero} série ${reservado.serie}` +
+        `${reservado.maiorRegistrado ? ` | maior registrado ${reservado.maiorRegistrado}` : ""}.`
+      );
+
+      return reservado;
+    } catch (e) {
+      console.warn(
+        "⚠ reserva atômica remota indisponível; usando proteção local de emergência:",
+        e.message
+      );
+
+      let maiorRegistrado = 0;
+      try {
+        const notas = await listarNfceNotasRemotas({});
+        maiorRegistrado = notas.reduce(
+          (maior, nota) => Math.max(maior, Number(nota.numero || 0)),
+          0
+        );
+      } catch {}
+
+      const numero = Math.max(
+        sequencial++,
+        maiorRegistrado + 1,
+        Number(minimo || 0)
+      );
+
+      return { numero, serie: 1, fallbackLocal: true };
+    }
+  });
+}
+
+async function numeroNfceOcupadoPorOutraAutorizada(nota = {}) {
+  const numero = Number(nota.numero || 0);
+  if (!numero || !API_BELA_SHEETS) return false;
 
   try {
     const notas = await listarNfceNotasRemotas({});
-    maiorRegistrado = notas.reduce(
-      (maior, nota) => Math.max(maior, Number(nota.numero || 0)),
-      0
-    );
+    const idAtual = String(nota.id || "");
+    const vendaAtual = String(nota.vendaId || "");
+
+    return notas.some(registro => {
+      if (Number(registro.numero || 0) !== numero) return false;
+
+      const status = String(registro.status || "").toLowerCase();
+      if (!status.includes("autoriz")) return false;
+
+      const idRegistro = String(registro.id || "");
+      const vendaRegistro = String(registro.vendaId || "");
+
+      const mesmaNota =
+        idRegistro === idAtual &&
+        vendaRegistro === vendaAtual;
+
+      return !mesmaNota;
+    });
   } catch (e) {
-    console.warn("⚠ não foi possível conferir o maior número no Apps Script:", e.message);
-  }
-
-  const numeroReservado = Number(reservado.numero || 1);
-  const numeroSeguro = Math.max(numeroReservado, maiorRegistrado + 1);
-
-  if (numeroSeguro !== numeroReservado) {
     console.warn(
-      `[NFC-e] Numeração remota defasada: reservada ${numeroReservado}, ` +
-      `maior registrada ${maiorRegistrado}. Usando ${numeroSeguro}.`
+      `[NFC-e] Não foi possível verificar ocupação do número ${numero}: ${e.message}`
     );
+    return false;
   }
-
-  return {
-    numero: numeroSeguro,
-    serie: Number(reservado.serie || 1)
-  };
 }
 
 function notaTemRejeicaoDuplicidade(nota = {}) {
@@ -1129,16 +1202,16 @@ function notaTemRejeicaoDuplicidade(nota = {}) {
   return cStat === "539" || motivo.includes("duplicidade");
 }
 
-async function renumerarNotaRejeitadaPorDuplicidade(nota) {
-  if (!notaTemRejeicaoDuplicidade(nota)) return false;
+async function renumerarNotaSeNumeroOcupadoOuDuplicidade(nota) {
+  const duplicidadeSefaz = notaTemRejeicaoDuplicidade(nota);
+  const numeroOcupado = await numeroNfceOcupadoPorOutraAutorizada(nota);
+
+  if (!duplicidadeSefaz && !numeroOcupado) return false;
 
   const numeroAnterior = Number(nota.numero || 0);
   const chaveAnterior = somenteDigitos(nota.chaveAcesso || nota.chave || "");
-  const reservado = await obterNumeroNfceSeguro();
-  const novoNumero = Math.max(
-    Number(reservado.numero || 1),
-    numeroAnterior + 1
-  );
+  const reservado = await obterNumeroNfceSeguro(numeroAnterior + 1);
+  const novoNumero = Number(reservado.numero || numeroAnterior + 1);
 
   const agoraIso = new Date().toISOString();
   const novoCnf = gerarCodigoNumerico(
@@ -1181,7 +1254,7 @@ async function renumerarNotaRejeitadaPorDuplicidade(nota) {
   nota.xml_url = `${BASE_URL}/nfce/${encodeURIComponent(nota.id)}/xml`;
 
   console.warn(
-    `[NFC-e] Rejeição 539 detectada. Nota ${numeroAnterior} renumerada ` +
+    `[NFC-e] Numeração ocupada/duplicidade detectada. Nota ${numeroAnterior} renumerada ` +
     `com segurança para ${novoNumero}.`
   );
 
@@ -2775,7 +2848,7 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
       );
     }
 
-    const foiRenumerada = await renumerarNotaRejeitadaPorDuplicidade(nota);
+    const foiRenumerada = await renumerarNotaSeNumeroOcupadoOuDuplicidade(nota);
 
     if (!foiRenumerada) {
       atualizarDataHoraReenvioNfce(nota);
