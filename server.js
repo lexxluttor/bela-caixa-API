@@ -1064,13 +1064,14 @@ function mapearFormaPagamentoFiscal(tipo = "") {
   throw new Error(`Forma de pagamento fiscal não reconhecida: "${tipo}".`);
 }
 
-function gerarDetalhePagamentoFiscal(nota = {}) {
-  const formaRecebida = nota.pagamento?.tipo || "";
+function gerarUmDetalhePagamentoFiscal(formaRecebida, valorRecebido) {
   const tPag = mapearFormaPagamentoFiscal(formaRecebida);
-  const vPag = dinheiro(nota.pagamento?.valor ?? nota.total);
+  const vPag = dinheiro(valorRecebido);
   const exigeGrupoCard = tPag === "03" || tPag === "04" || tPag === "17";
   const indPag = tPag === "05" ? "1" : "0";
 
+  // REGRA JÁ EXISTENTE PRESERVADA:
+  // Crédito, débito e PIX usam grupo <card>; demais formas não usam.
   const grupoCartao = exigeGrupoCard
     ? `<card><tpIntegra>2</tpIntegra></card>`
     : "";
@@ -1080,6 +1081,48 @@ function gerarDetalhePagamentoFiscal(nota = {}) {
   );
 
   return `<detPag><indPag>${indPag}</indPag><tPag>${tPag}</tPag><vPag>${vPag}</vPag>${grupoCartao}</detPag>`;
+}
+
+function gerarDetalhePagamentoFiscal(nota = {}) {
+  const formaRecebida = nota.pagamento?.tipo || "";
+  const formaNormalizada = normalizarFormaPagamentoTexto(formaRecebida);
+
+  if (formaNormalizada === "DIVIDIDO" || formaNormalizada === "PAGAMENTO DIVIDIDO") {
+    const detalhes = Array.isArray(nota.pagamento?.detalhes)
+      ? nota.pagamento.detalhes.filter(p => Number(p?.valor || 0) > 0)
+      : [];
+
+    if (!detalhes.length) {
+      throw new Error(
+        "Pagamento dividido informado, mas as formas/valores individuais não foram recebidos pelo servidor."
+      );
+    }
+
+    const somaCentavos = detalhes.reduce(
+      (soma, p) => soma + Math.round(Number(p.valor || 0) * 100),
+      0
+    );
+    const totalCentavos = Math.round(Number(nota.total || 0) * 100);
+
+    if (somaCentavos !== totalCentavos) {
+      throw new Error(
+        `Pagamento dividido não confere com o total da NFC-e: pagamentos R$ ${(somaCentavos / 100).toFixed(2)} | total R$ ${(totalCentavos / 100).toFixed(2)}.`
+      );
+    }
+
+    console.log(
+      `[NFC-e] Pagamento dividido: ${detalhes.length} forma(s) | total R$ ${(somaCentavos / 100).toFixed(2)}`
+    );
+
+    return detalhes
+      .map(p => gerarUmDetalhePagamentoFiscal(p.tipo, p.valor))
+      .join("");
+  }
+
+  return gerarUmDetalhePagamentoFiscal(
+    formaRecebida,
+    nota.pagamento?.valor ?? nota.total
+  );
 }
 
 // ================= APPS SCRIPT / XML / NOTAS =================
@@ -1559,6 +1602,81 @@ function obterProdutoFiscal(item = {}) {
   return resolverFiscalProdutoCompleto(item);
 }
 
+function extrairDetalhesPagamentoDividido(body = {}) {
+  const pagamento = body.pagamento && typeof body.pagamento === "object"
+    ? body.pagamento
+    : {};
+
+  const candidatosArray = [
+    pagamento.detalhes,
+    pagamento.pagamentos,
+    pagamento.formas,
+    pagamento.itens,
+    pagamento.divisao,
+    body.pagamentos,
+    body.pagamentos_divididos,
+    body.pagamentosDivididos
+  ];
+
+  const lista = candidatosArray.find(Array.isArray);
+
+  if (Array.isArray(lista)) {
+    return lista
+      .map(item => {
+        if (!item || typeof item !== "object") return null;
+
+        const tipo =
+          item.tipo ??
+          item.forma ??
+          item.metodo ??
+          item.nome ??
+          item.label ??
+          "";
+
+        const valor =
+          item.valor ??
+          item.valorPago ??
+          item.valor_pago ??
+          item.amount ??
+          item.total ??
+          0;
+
+        const valorNumero = Number(String(valor).replace(",", "."));
+
+        if (!String(tipo || "").trim() || !Number.isFinite(valorNumero) || valorNumero <= 0) {
+          return null;
+        }
+
+        return {
+          tipo: normalizarFormaPagamentoTexto(tipo),
+          valor: valorNumero
+        };
+      })
+      .filter(Boolean);
+  }
+
+  const chavesDiretas = [
+    ["dinheiro", "DINHEIRO"],
+    ["pix", "PIX"],
+    ["credito", "CREDITO"],
+    ["crédito", "CREDITO"],
+    ["debito", "DEBITO"],
+    ["débito", "DEBITO"],
+    ["crediario", "CREDIARIO"],
+    ["crediário", "CREDIARIO"],
+    ["fiado", "FIADO"]
+  ];
+
+  const diretos = [];
+  for (const [chave, tipo] of chavesDiretas) {
+    if (pagamento[chave] == null) continue;
+    const valor = Number(String(pagamento[chave]).replace(",", "."));
+    if (Number.isFinite(valor) && valor > 0) diretos.push({ tipo, valor });
+  }
+
+  return diretos;
+}
+
 function normalizarPayload(body = {}) {
   const itens = (Array.isArray(body.itens) ? body.itens : []).map(obterProdutoFiscal);
 
@@ -1579,6 +1697,12 @@ function normalizarPayload(body = {}) {
         ? Number(body.valor_pagamento)
         : total;
   const pagamentoTipo = extrairFormaPagamentoPayload(body);
+  const pagamentoTipoNormalizado = normalizarFormaPagamentoTexto(pagamentoTipo);
+  const pagamentoDetalhes =
+    pagamentoTipoNormalizado === "DIVIDIDO" ||
+    pagamentoTipoNormalizado === "PAGAMENTO DIVIDIDO"
+      ? extrairDetalhesPagamentoDividido(body)
+      : [];
 
   return {
     vendaId: String(body.vendaId || body.id || `nfce-${Date.now()}`),
@@ -1592,8 +1716,9 @@ function normalizarPayload(body = {}) {
     desconto,
     total,
     pagamento: {
-      tipo: normalizarFormaPagamentoTexto(pagamentoTipo),
-      valor: pagamentoValor
+      tipo: pagamentoTipoNormalizado,
+      valor: pagamentoValor,
+      ...(pagamentoDetalhes.length ? { detalhes: pagamentoDetalhes } : {})
     }
   };
 }
