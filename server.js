@@ -1139,7 +1139,7 @@ async function obterNumeroNfceRemoto() {
   };
 }
 
-async function reservarNumeroNfceRemoto(minimo = 0) {
+async function reservarNumeroNfceRemoto({ minimo = 0, vendaId = "", token = "" } = {}) {
   if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
   const data = await fetchJson(API_BELA_SHEETS, {
@@ -1147,7 +1147,9 @@ async function reservarNumeroNfceRemoto(minimo = 0) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       action: "reservarNumeroNfce",
-      minimo: Number(minimo || 0)
+      minimo: Number(minimo || 0),
+      vendaId: String(vendaId || ""),
+      token: String(token || "")
     })
   });
 
@@ -1155,45 +1157,96 @@ async function reservarNumeroNfceRemoto(minimo = 0) {
     numero: toNumber(data.numero, 1),
     serie: toNumber(data.serie, 1),
     proximoNumero: toNumber(data.proximoNumero, 0),
-    maiorRegistrado: toNumber(data.maiorRegistrado, 0)
+    maiorConsumido: toNumber(data.maiorConsumido, 0),
+    reservaStatus: String(data.reservaStatus || "reservada")
   };
 }
 
-async function obterNumeroNfceSeguro(minimo = 0) {
-  return await comTravaLocalNumeroNfce(async () => {
-    try {
-      const reservado = await reservarNumeroNfceRemoto(minimo);
+async function alterarReservaNumeroNfceRemoto(action, reserva, motivo = "") {
+  if (!reserva || !reserva.numero || !reserva.token) return null;
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
-      console.log(
-        `[NFC-e] Número reservado atomicamente: ${reservado.numero} série ${reservado.serie}` +
-        `${reservado.maiorRegistrado ? ` | maior registrado ${reservado.maiorRegistrado}` : ""}.`
-      );
-
-      return reservado;
-    } catch (e) {
-      console.warn(
-        "⚠ reserva atômica remota indisponível; usando proteção local de emergência:",
-        e.message
-      );
-
-      let maiorRegistrado = 0;
-      try {
-        const notas = await listarNfceNotasRemotas({});
-        maiorRegistrado = notas.reduce(
-          (maior, nota) => Math.max(maior, Number(nota.numero || 0)),
-          0
-        );
-      } catch {}
-
-      const numero = Math.max(
-        sequencial++,
-        maiorRegistrado + 1,
-        Number(minimo || 0)
-      );
-
-      return { numero, serie: 1, fallbackLocal: true };
-    }
+  return await fetchJson(API_BELA_SHEETS, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action,
+      numero: Number(reserva.numero),
+      token: String(reserva.token),
+      motivo: String(motivo || "")
+    })
   });
+}
+
+async function confirmarNumeroNfceRemoto(reserva, motivo = "") {
+  return await alterarReservaNumeroNfceRemoto("confirmarNumeroNfce", reserva, motivo);
+}
+
+async function liberarNumeroNfceRemoto(reserva, motivo = "") {
+  return await alterarReservaNumeroNfceRemoto("liberarNumeroNfce", reserva, motivo);
+}
+
+async function bloquearNumeroNfceRemoto(reserva, motivo = "") {
+  return await alterarReservaNumeroNfceRemoto("bloquearNumeroNfce", reserva, motivo);
+}
+
+async function obterNumeroNfceSeguro({ minimo = 0, vendaId = "", token = "" } = {}) {
+  return await comTravaLocalNumeroNfce(async () => {
+    if (!API_BELA_SHEETS) {
+      throw new Error("Numeração fiscal segura indisponível: API_BELA_SHEETS não configurada.");
+    }
+
+    const reservado = await reservarNumeroNfceRemoto({ minimo, vendaId, token });
+
+    console.log(
+      `[NFC-e] Número reservado temporariamente: ${reservado.numero} série ${reservado.serie}` +
+      `${reservado.maiorConsumido ? ` | maior consumido ${reservado.maiorConsumido}` : ""}.`
+    );
+
+    return reservado;
+  });
+}
+
+function cStatConsomeNumeroNfce(cStat = "") {
+  return ["100", "110", "301", "302", "204", "539"].includes(String(cStat || "").trim());
+}
+
+async function finalizarReservaAposRetornoSefaz(reserva, retorno = {}) {
+  if (!reserva) return;
+
+  const cStat = String(retorno.cStat || "").trim();
+  const motivo = String(retorno.xMotivo || "").trim();
+
+  try {
+    if (retorno.autorizado || cStatConsomeNumeroNfce(cStat)) {
+      await confirmarNumeroNfceRemoto(
+        reserva,
+        retorno.autorizado ? "Autorizada pela SEFAZ" : `Número fiscalmente ocupado: cStat ${cStat} ${motivo}`
+      );
+      console.log(`[NFC-e] Número ${reserva.numero} confirmado como consumido.`);
+      return;
+    }
+
+    if (retorno.transmitido && cStat) {
+      await liberarNumeroNfceRemoto(reserva, `Rejeição SEFAZ cStat ${cStat}: ${motivo}`);
+      console.log(`[NFC-e] Número ${reserva.numero} liberado após rejeição da SEFAZ.`);
+      return;
+    }
+
+    if (!retorno.transmitido) {
+      await liberarNumeroNfceRemoto(reserva, motivo || "Tentativa não transmitida à SEFAZ");
+      console.log(`[NFC-e] Número ${reserva.numero} liberado; não houve transmissão à SEFAZ.`);
+      return;
+    }
+
+    await bloquearNumeroNfceRemoto(reserva, "Transmissão realizada sem resultado fiscal conclusivo.");
+    console.error(`[NFC-e] Número ${reserva.numero} BLOQUEADO por resultado fiscal incerto.`);
+  } catch (e) {
+    console.error(
+      `[NFC-e] Falha ao finalizar reserva do número ${reserva.numero}. ` +
+      `A emissão seguinte deve permanecer bloqueada até conferência: ${e.message}`
+    );
+  }
 }
 
 async function numeroNfceOcupadoPorOutraAutorizada(nota = {}) {
@@ -1253,7 +1306,11 @@ async function renumerarNotaSeNumeroOcupadoOuDuplicidade(nota) {
 
   const numeroAnterior = Number(nota.numero || 0);
   const chaveAnterior = somenteDigitos(nota.chaveAcesso || nota.chave || "");
-  const reservado = await obterNumeroNfceSeguro(numeroAnterior + 1);
+  const reservado = await obterNumeroNfceSeguro({
+    minimo: numeroAnterior + 1,
+    vendaId: nota.vendaId || nota.id || "",
+    token: crypto.randomUUID()
+  });
   const novoNumero = Number(reservado.numero || numeroAnterior + 1);
 
   const agoraIso = new Date().toISOString();
@@ -1497,17 +1554,26 @@ function notaLocalSemTransmissaoPodeSerRecriada(nota = {}) {
     sefaz.autorizado === true ||
     protocolo !== "";
   const transmitida = sefaz.transmitido === true;
+  const cStat = String(sefaz.cStat || nota.cStat || "").trim();
+  const denegada = ["110", "301", "302"].includes(cStat) || status.includes("deneg");
+  const respostaIncerta = transmitida && !cStat;
 
-  if (autorizada || transmitida) return false;
+  if (autorizada || denegada || respostaIncerta) return false;
+
+  // Erro local OU rejeição oficial: o número não fica preso à venda.
+  // No reenvio a venda entra novamente no fluxo normal e recebe o número
+  // atualmente disponível, que pode ser o mesmo se ninguém o consumiu.
+  if (status === "rejeitada" && cStat) return true;
 
   return [
     "emitida_homologacao",
     "emitida",
     "pendente",
     "erro_xsd",
+    "rejeitada_schema_local",
     "xml_invalido",
     "rejeitada_localmente"
-  ].includes(status);
+  ].includes(status) && !transmitida;
 }
 
 async function recriarEEmitirNfcePorVenda(vendaId) {
@@ -2950,14 +3016,14 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
       return res.status(recriacao.status).json(recriacao.dados);
     }
 
-    // Se a tentativa anterior parou localmente antes de chegar à SEFAZ
-    // (por exemplo, erro de XSD), não reutiliza o XML antigo. Reconstrói
-    // a NFC-e pela venda original, gerando nova data, número, chave e XML.
+    // Erro local ou rejeição oficial libera a numeração. No reenvio, a venda
+    // volta ao fluxo normal e usa o número atualmente disponível. Se nenhuma
+    // outra nota o consumiu, o mesmo número será naturalmente reutilizado.
     if (notaLocalSemTransmissaoPodeSerRecriada(nota)) {
       const vendaId = String(nota.vendaId || req.params.id);
       console.warn(
-        `[NFC-e] Nota ${req.params.id} existe, mas não foi transmitida à SEFAZ. ` +
-        `Descartando a tentativa local e recriando pela venda ${vendaId}.`
+        `[NFC-e] Tentativa ${req.params.id} não consumiu numeração fiscal. ` +
+        `Recriando pela venda ${vendaId} com o próximo número disponível.`
       );
 
       const recriacao = await recriarEEmitirNfcePorVenda(vendaId);
@@ -2973,12 +3039,39 @@ app.post("/nfce/:id/enviar-sefaz", async (req, res) => {
       );
     }
 
-    const foiRenumerada = await renumerarNotaSeNumeroOcupadoOuDuplicidade(nota);
+    const cStatAtual = String(nota.sefaz?.cStat || nota.cStat || "").trim();
+    const respostaFiscalIncerta = nota.sefaz?.transmitido === true && !cStatAtual;
 
-    if (!foiRenumerada) {
-      atualizarDataHoraReenvioNfce(nota);
+    if (respostaFiscalIncerta) {
+      return res.status(409).json({
+        ok: false,
+        pendente_consulta_sefaz: true,
+        error: "A transmissão anterior ficou sem resultado fiscal conclusivo. Consulte a chave na SEFAZ antes de reenviar ou liberar este número."
+      });
     }
 
+    const numeroOcupado = await numeroNfceOcupadoPorOutraAutorizada(nota);
+    const duplicidadeSefaz = notaTemRejeicaoDuplicidade(nota);
+    if (numeroOcupado || duplicidadeSefaz) {
+      const vendaId = String(nota.vendaId || req.params.id);
+      console.warn(
+        `[NFC-e] Número ${nota.numero} já está ocupado/duplicado. ` +
+        `Recriando a venda ${vendaId} pelo fluxo de numeração disponível.`
+      );
+      const recriacao = await recriarEEmitirNfcePorVenda(vendaId);
+      if (recriacao) {
+        recriacao.dados.renumerada = true;
+        recriacao.dados.numeroAnterior = nota.numero;
+        return res.status(recriacao.status).json(recriacao.dados);
+      }
+      return res.status(409).json({
+        ok: false,
+        error: "A numeração desta tentativa está ocupada e a venda original não foi encontrada para recriação segura."
+      });
+    }
+
+    const foiRenumerada = false;
+    atualizarDataHoraReenvioNfce(nota);
     await salvarNota(nota);
 
     const xmlOriginal = gerarXML(nota);
@@ -3045,25 +3138,25 @@ app.get("/empresa", (req, res) => {
 });
 
 app.post("/nfce/emitir", async (req, res) => {
+  let reservaNumero = null;
+  let transmissaoIniciada = false;
+
   try {
     const venda = normalizarPayload(req.body);
     const id = String(req.body.vendaId || req.body.id || venda.vendaId || `nfce-${Date.now()}`);
 
     let numero;
     let serie;
-    let numeracaoOrigem = "local";
+    const numeracaoOrigem = "apps_script_reserva_temporaria";
+    const tokenReserva = crypto.randomUUID();
 
-    try {
-      if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
-      const remoto = await obterNumeroNfceSeguro();
-      numero = remoto.numero;
-      serie = remoto.serie;
-      numeracaoOrigem = "apps_script";
-    } catch (e) {
-      numero = sequencial++;
-      serie = 1;
-      console.warn("⚠ usando numeração local:", e.message);
-    }
+    const remoto = await obterNumeroNfceSeguro({
+      vendaId: id,
+      token: tokenReserva
+    });
+    numero = remoto.numero;
+    serie = remoto.serie;
+    reservaNumero = { numero, serie, token: tokenReserva, vendaId: id };
 
     const dataEmissaoIso = new Date().toISOString();
     const cNF = gerarCodigoNumerico(numero, id);
@@ -3116,6 +3209,10 @@ app.post("/nfce/emitir", async (req, res) => {
     }
 
     if (!assinatura.assinado) {
+      await liberarNumeroNfceRemoto(reservaNumero, "Falha local de assinatura antes da transmissão");
+      console.log(`[NFC-e] Número ${numero} liberado após falha local de assinatura.`);
+      reservaNumero = null;
+
       return res.status(400).json({
         ok: false,
         mensagem: "O XML foi gerado, mas não pôde ser assinado. A NFC-e não foi enviada à SEFAZ.",
@@ -3132,7 +3229,8 @@ app.post("/nfce/emitir", async (req, res) => {
           xml_assinado: false,
           erro_assinatura: assinatura.erro,
           erro_apps_script: erroAppsScript,
-          sefaz_auto_envio: false
+          sefaz_auto_envio: false,
+          numero_liberado: true
         }
       });
     }
@@ -3142,19 +3240,51 @@ app.post("/nfce/emitir", async (req, res) => {
       nota.status = "rejeitada_schema_local";
       nota.erro_xsd = validacaoXsd.erros;
       await salvarNota(nota);
+
+      await liberarNumeroNfceRemoto(reservaNumero, "Falha local XSD antes da transmissão");
+      console.log(`[NFC-e] Número ${numero} liberado após falha XSD local.`);
+      reservaNumero = null;
+
       return res.status(400).json({
         ok: false,
         mensagem: "O XML assinado não passou na validação XSD e não foi enviado à SEFAZ.",
         erros_xsd: validacaoXsd.erros,
         schema_xsd: validacaoXsd.schema ? path.basename(validacaoXsd.schema) : "",
-        nfce: { id: nota.id, numero: nota.numero, serie: nota.serie, chave: nota.chave, status: nota.status }
+        nfce: {
+          id: nota.id,
+          numero: nota.numero,
+          serie: nota.serie,
+          chave: nota.chave,
+          status: nota.status,
+          numero_liberado: true
+        }
       });
     }
 
     console.log(`→ Enviando NFC-e ${nota.numero} série ${nota.serie} para a SEFAZ...`);
+    transmissaoIniciada = true;
 
-    const retornoSefaz = await transmitirNfceSefaz(nota, xml);
+    let retornoSefaz;
+    try {
+      retornoSefaz = await transmitirNfceSefaz(nota, xml);
+    } catch (erroTransmissao) {
+      // Depois que a chamada de transmissão começou, uma exceção de rede é
+      // tratada como resultado INCERTO. O número não pode ser liberado até
+      // consulta oficial confirmar o destino fiscal da chave.
+      try {
+        await bloquearNumeroNfceRemoto(
+          reservaNumero,
+          `Falha durante comunicação com a SEFAZ: ${erroTransmissao.message || "sem detalhe"}`
+        );
+      } catch (erroBloqueio) {
+        console.error("❌ Falha ao bloquear numeração após erro de transmissão:", erroBloqueio.message);
+      }
+      throw erroTransmissao;
+    }
+
     const notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
+    await finalizarReservaAposRetornoSefaz(reservaNumero, retornoSefaz);
+    reservaNumero = null;
 
     console.log(
       `← SEFAZ NFC-e ${nota.numero}: cStat=${retornoSefaz.cStat || "sem cStat"} ` +
@@ -3196,10 +3326,22 @@ app.post("/nfce/emitir", async (req, res) => {
         dhRecbto: retornoSefaz.dhRecbto || "",
         httpStatus: retornoSefaz.httpStatus || null,
         pendente_habilitacao: !!retornoSefaz.pendente_habilitacao,
-        pendente_configuracao: !!retornoSefaz.pendente_configuracao
+        pendente_configuracao: !!retornoSefaz.pendente_configuracao,
+        numero_consumido: !!(retornoSefaz.autorizado || cStatConsomeNumeroNfce(retornoSefaz.cStat)),
+        numero_liberado: !!(retornoSefaz.transmitido && retornoSefaz.cStat && !cStatConsomeNumeroNfce(retornoSefaz.cStat))
       }
     });
   } catch (e) {
+    // Só libera automaticamente se a transmissão ainda não começou.
+    if (reservaNumero && !transmissaoIniciada) {
+      try {
+        await liberarNumeroNfceRemoto(reservaNumero, `Erro local antes da transmissão: ${e.message || "sem detalhe"}`);
+        console.log(`[NFC-e] Número ${reservaNumero.numero} liberado após erro local.`);
+      } catch (erroLiberacao) {
+        console.error("❌ Falha ao liberar reserva após erro local:", erroLiberacao.message);
+      }
+    }
+
     res.status(400).json({
       ok: false,
       error: e.message || "Erro ao estruturar NFC-e."
