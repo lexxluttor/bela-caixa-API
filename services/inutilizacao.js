@@ -269,6 +269,11 @@ function montarPagina({ ambienteNome, serie, anoAtual }) {
   button:disabled{opacity:.55;cursor:wait}
   .warn{margin-top:18px;padding:13px 14px;border-radius:11px;background:#fff7e8;border:1px solid #f3d28e;font-size:14px}
   #resultado{margin-top:22px;display:none;padding:16px;border-radius:12px;background:#f7f8fa;white-space:pre-wrap;word-break:break-word}
+  .hist{margin-top:28px;border-top:1px solid #e6e9ee;padding-top:22px}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px}
+  th,td{padding:9px 7px;border-bottom:1px solid #e6e9ee;text-align:left;vertical-align:top}
+  th{font-size:11px;text-transform:uppercase;color:#667085}
+  .muted{color:#667085}
   .ok{border-left:5px solid #24945f}.erro{border-left:5px solid #c0392b}
 </style>
 </head>
@@ -305,10 +310,60 @@ function montarPagina({ ambienteNome, serie, anoAtual }) {
 
     <button id="btn" onclick="transmitir()">Transmitir inutilização à SEFAZ</button>
     <div id="resultado"></div>
+
+    <div class="hist">
+      <h2 style="margin:0;font-size:19px">Inutilizações homologadas</h2>
+      <div class="help">Histórico persistente salvo no Apps Script.</div>
+      <div id="historico" class="muted" style="margin-top:12px">Carregando...</div>
+    </div>
   </div>
 </div>
 
 <script>
+function escHtml(v){
+  return String(v == null ? '' : v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+async function carregarHistorico(){
+  const box = document.getElementById('historico');
+  try{
+    const r = await fetch('/inutilizacao-fiscal/historico');
+    const data = await r.json();
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+
+    if(!rows.length){
+      box.innerHTML = 'Nenhuma inutilização homologada registrada.';
+      return;
+    }
+
+    box.innerHTML =
+      '<table><thead><tr>' +
+      '<th>Faixa</th><th>Ano/Série</th><th>Ambiente</th>' +
+      '<th>cStat</th><th>Protocolo</th><th>Recebimento</th>' +
+      '</tr></thead><tbody>' +
+      rows.map(function(x){
+        const ini = Number(x.numeroInicial || 0);
+        const fim = Number(x.numeroFinal || ini);
+        const faixa = fim && fim !== ini ? ini + ' a ' + fim : String(ini);
+        return '<tr>' +
+          '<td><strong>' + escHtml(faixa) + '</strong></td>' +
+          '<td>' + escHtml(x.ano || '') + ' / ' + escHtml(x.serie || '') + '</td>' +
+          '<td>' + escHtml(x.ambienteNome || x.ambiente || '${ambienteNome}') + '</td>' +
+          '<td>' + escHtml(x.cStat || '') + '</td>' +
+          '<td>' + escHtml(x.protocolo || '') + '</td>' +
+          '<td>' + escHtml(x.dhRecbto || '') + '</td>' +
+        '</tr>';
+      }).join('') +
+      '</tbody></table>';
+  }catch(e){
+    box.textContent = 'Não foi possível carregar o histórico: ' + e.message;
+  }
+}
+
+window.addEventListener('DOMContentLoaded', carregarHistorico);
 async function transmitir(){
   const numero = document.getElementById('numero').value.trim();
   const ano = Number(document.getElementById('ano').value);
@@ -371,7 +426,8 @@ export function registrarInutilizacaoFiscal({
   httpsPostComCertificado,
   extrairTagXml,
   listarNfceNotasRemotas,
-  registrarInutilizacaoNfceRemoto
+  registrarInutilizacaoNfceRemoto,
+  listarInutilizacoesNfceRemotas
 }) {
   if (!app) throw new Error("Inutilização Fiscal: app não informado.");
 
@@ -402,6 +458,23 @@ export function registrarInutilizacaoFiscal({
 
   app.get("/inutilizacao", proteger, (req, res) => {
     res.redirect("/inutilizacao-fiscal");
+  });
+
+  app.get("/inutilizacao-fiscal/historico", proteger, async (req, res) => {
+    try {
+      const rows =
+        typeof listarInutilizacoesNfceRemotas === "function"
+          ? await listarInutilizacoesNfceRemotas()
+          : [];
+
+      return res.json({ ok: true, rows });
+    } catch (e) {
+      return res.status(502).json({
+        ok: false,
+        rows: [],
+        error: e.message || "Falha ao carregar histórico de inutilizações."
+      });
+    }
   });
 
   app.post("/inutilizacao-fiscal/transmitir", proteger, async (req, res) => {
@@ -496,15 +569,25 @@ export function registrarInutilizacaoFiscal({
 
       if (inutilizada && typeof registrarInutilizacaoNfceRemoto === "function") {
         try {
+          const idPedidoMatch = String(xmlAssinado || "").match(
+            /<infInut\b[^>]*\bId="([^"]+)"/i
+          );
+
           await registrarInutilizacaoNfceRemoto({
             numeroInicial,
             numeroFinal,
             serie,
             ano,
+            ambiente: tpAmb,
+            ambienteNome: tpAmb === "1" ? "PRODUÇÃO" : "HOMOLOGAÇÃO",
             protocolo: nProt,
             dhRecbto,
             cStat,
-            xMotivo
+            xMotivo,
+            justificativa,
+            idPedido: idPedidoMatch ? idPedidoMatch[1] : "",
+            xmlPedido: xmlAssinado,
+            xmlRetorno: body
           });
           sincronizacaoContador = true;
         } catch (e) {
