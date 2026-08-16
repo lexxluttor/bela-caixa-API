@@ -12,6 +12,7 @@ import libxmljs from "libxmljs2";
 import { criarServicoCancelamento } from "./services/cancelamento.js";
 import { registrarConferenciaFiscal } from "./services/conferencia-fiscal.js";
 import { registrarXmlContabilidade } from "./services/xml-contabilidade.js";
+import { registrarInutilizacaoFiscal } from "./services/inutilizacao.js";
 
 const app = express();
 app.use(cors());
@@ -278,6 +279,7 @@ const SEFAZ_ENDPOINTS_MG = {
     evento: "https://nfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
     consulta: "https://nfce.fazenda.mg.gov.br/nfce/services/NFeConsultaProtocolo4",
     status: "https://nfce.fazenda.mg.gov.br/nfce/services/NFeStatusServico4",
+    inutilizacao: "https://nfce.fazenda.mg.gov.br/nfce/services/NFeInutilizacao4",
     portal: "https://portalsped.fazenda.mg.gov.br/portalnfce"
   },
   "2": {
@@ -285,6 +287,7 @@ const SEFAZ_ENDPOINTS_MG = {
     evento: "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
     consulta: "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeConsultaProtocolo4",
     status: "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeStatusServico4",
+    inutilizacao: "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeInutilizacao4",
     portal: "https://hportalsped.fazenda.mg.gov.br/portalnfce"
   }
 };
@@ -321,6 +324,7 @@ const SEFAZ_CONFIG = {
   eventoUrl: process.env.SEFAZ_NFCE_EVENTO_URL || ENDPOINTS_AMBIENTE.evento,
   consultaUrl: process.env.SEFAZ_NFCE_CONSULTA_URL || ENDPOINTS_AMBIENTE.consulta,
   statusUrl: process.env.SEFAZ_NFCE_STATUS_URL || ENDPOINTS_AMBIENTE.status,
+  inutilizacaoUrl: process.env.SEFAZ_NFCE_INUTILIZACAO_URL || ENDPOINTS_AMBIENTE.inutilizacao,
   timeoutMs: Number(process.env.SEFAZ_TIMEOUT_MS || 30000)
 };
 
@@ -1188,6 +1192,28 @@ async function liberarNumeroNfceRemoto(reserva, motivo = "") {
 
 async function bloquearNumeroNfceRemoto(reserva, motivo = "") {
   return await alterarReservaNumeroNfceRemoto("bloquearNumeroNfce", reserva, motivo);
+}
+
+async function registrarInutilizacaoNfceRemoto(dados = {}) {
+  if (!API_BELA_SHEETS) {
+    throw new Error("API_BELA_SHEETS não configurada");
+  }
+
+  return await fetchJson(API_BELA_SHEETS, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "registrarInutilizacaoNfce",
+      numeroInicial: Number(dados.numeroInicial || 0),
+      numeroFinal: Number(dados.numeroFinal || 0),
+      serie: Number(dados.serie || 1),
+      ano: Number(dados.ano || 0),
+      protocolo: String(dados.protocolo || ""),
+      dhRecbto: String(dados.dhRecbto || ""),
+      cStat: String(dados.cStat || ""),
+      xMotivo: String(dados.xMotivo || "")
+    })
+  });
 }
 
 async function obterNumeroNfceSeguro({ minimo = 0, vendaId = "", token = "" } = {}) {
@@ -2801,6 +2827,19 @@ registrarXmlContabilidade({
     conferenciaFiscal.extrairXmlPersistidoConferencia,
   listarNotasLocal,
   consultarSituacaoFiscalOficial
+});
+
+registrarInutilizacaoFiscal({
+  app,
+  protegerModuloConferencia,
+  NFCE_CONFIG,
+  EMPRESA,
+  SEFAZ_CONFIG,
+  carregarCertificadoFiscal,
+  httpsPostComCertificado,
+  extrairTagXml,
+  listarNfceNotasRemotas,
+  registrarInutilizacaoNfceRemoto
 });
 
 // ================= CANCELAMENTO NFC-E =================
