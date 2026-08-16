@@ -162,12 +162,20 @@ function assinarXmlInutilizacao(xml, carregarCertificadoFiscal) {
 }
 
 function montarEnvelopeSoapInutilizacao(xmlAssinado) {
+  // O XML da inutilização fica EMBUTIDO dentro de <nfeDadosMsg>.
+  // Portanto ele não pode carregar uma segunda declaração <?xml ...?>,
+  // pois a única declaração XML válida é a do envelope SOAP.
+  const xmlLimpo = String(xmlAssinado || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/<\?xml[^>]*\?>/i, "")
+    .trim();
+
   return (
     `<?xml version="1.0" encoding="UTF-8"?>` +
     `<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">` +
       `<soap12:Body>` +
         `<nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeInutilizacao4">` +
-          xmlAssinado +
+          xmlLimpo +
         `</nfeDadosMsg>` +
       `</soap12:Body>` +
     `</soap12:Envelope>`
