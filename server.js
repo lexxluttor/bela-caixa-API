@@ -1892,7 +1892,7 @@ function gerarXML(nota) {
     const descricaoProduto =
       String(NFCE_CONFIG.tpAmb) === "2" && idx === 0
         ? "NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
-        : String(item.descricao || "PRODUTO");
+        : sanitizarTextoFiscalReemissao(item.descricao || "PRODUTO");
 
     const cestXml = item.cest ? `
         <CEST>${esc(item.cest)}</CEST>` : "";
