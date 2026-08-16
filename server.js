@@ -1208,12 +1208,26 @@ async function registrarInutilizacaoNfceRemoto(dados = {}) {
       numeroFinal: Number(dados.numeroFinal || 0),
       serie: Number(dados.serie || 1),
       ano: Number(dados.ano || 0),
+      ambiente: String(dados.ambiente || ""),
+      ambienteNome: String(dados.ambienteNome || ""),
       protocolo: String(dados.protocolo || ""),
       dhRecbto: String(dados.dhRecbto || ""),
       cStat: String(dados.cStat || ""),
-      xMotivo: String(dados.xMotivo || "")
+      xMotivo: String(dados.xMotivo || ""),
+      justificativa: String(dados.justificativa || ""),
+      idPedido: String(dados.idPedido || ""),
+      xmlPedido: String(dados.xmlPedido || ""),
+      xmlRetorno: String(dados.xmlRetorno || "")
     })
   });
+}
+
+async function listarInutilizacoesNfceRemotas() {
+  if (!API_BELA_SHEETS) return [];
+
+  const url = montarUrlAppsScript("listarNfceInutilizacoes");
+  const data = await fetchJson(url);
+  return Array.isArray(data.rows) ? data.rows : [];
 }
 
 async function obterNumeroNfceSeguro({ minimo = 0, vendaId = "", token = "" } = {}) {
@@ -2839,7 +2853,8 @@ registrarInutilizacaoFiscal({
   httpsPostComCertificado,
   extrairTagXml,
   listarNfceNotasRemotas,
-  registrarInutilizacaoNfceRemoto
+  registrarInutilizacaoNfceRemoto,
+  listarInutilizacoesNfceRemotas
 });
 
 // ================= CANCELAMENTO NFC-E =================
