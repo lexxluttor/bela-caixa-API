@@ -351,6 +351,108 @@ export function registrarConferenciaFiscal({
     }
   });
 
+  // ============================================================
+  // RECUPERAÇÃO SOMENTE LEITURA POR CHAVE NFC-e
+  // Não grava, não transmite e não altera numeração.
+  // Permite localizar um registro já existente e, quando ele não
+  // existe, devolver os dados oficiais que a SEFAZ disponibiliza
+  // pela consulta de protocolo. A gravação fica para etapa separada.
+  // ============================================================
+
+  async function localizarNotaPorChaveConferencia(chave = "") {
+    const chaveLimpa = somenteDigitos(chave);
+    if (chaveLimpa.length !== 44) return null;
+
+    // Primeiro procura no armazenamento persistente usado pelo sistema.
+    if (API_BELA_SHEETS) {
+      try {
+        const remotas = await listarNfceNotasRemotas({});
+        const encontrada = (Array.isArray(remotas) ? remotas : []).find(nota => {
+          const chaveNota = somenteDigitos(
+            nota?.chaveAcesso ||
+            nota?.chave ||
+            nota?.chaveNfce ||
+            nota?.chNFe ||
+            ""
+          );
+          return chaveNota === chaveLimpa;
+        });
+
+        if (encontrada) {
+          try {
+            return await lerNotaCompleta(encontrada.id || encontrada.vendaId || "") || encontrada;
+          } catch {
+            return encontrada;
+          }
+        }
+      } catch (erro) {
+        console.warn(
+          "[CONFERÊNCIA FISCAL] Falha ao procurar NFC-e por chave no Apps Script:",
+          erro.message
+        );
+      }
+    }
+
+    // Fallback para o armazenamento local do servidor.
+    try {
+      const locais = await listarNotasLocal();
+      return (Array.isArray(locais) ? locais : []).find(nota => {
+        const chaveNota = somenteDigitos(
+          nota?.chaveAcesso ||
+          nota?.chave ||
+          nota?.chaveNfce ||
+          nota?.chNFe ||
+          ""
+        );
+        return chaveNota === chaveLimpa;
+      }) || null;
+    } catch (erro) {
+      console.warn(
+        "[CONFERÊNCIA FISCAL] Falha ao procurar NFC-e por chave no armazenamento local:",
+        erro.message
+      );
+      return null;
+    }
+  }
+
+  function montarResumoRecuperacaoConferencia(oficial = {}, nota = null) {
+    const autorizacao = oficial.autorizacao || {};
+    const chave = somenteDigitos(
+      oficial.chNFe ||
+      autorizacao.chNFe ||
+      nota?.chaveAcesso ||
+      nota?.chave ||
+      ""
+    );
+
+    // A chave de acesso carrega série e número, mas eles só são
+    // usados como fallback quando o XML/registro local não está disponível.
+    const numeroChave = chave.length === 44 ? Number(chave.slice(25, 34)) : 0;
+    const serieChave = chave.length === 44 ? Number(chave.slice(22, 25)) : 0;
+
+    const xml = extrairXmlPersistidoConferencia(nota || {});
+    const identificacao = extrairIdentificacaoXmlNfce(xml);
+
+    return {
+      disponivel: oficial.classificacao?.confirmado === true,
+      confirmadoPelaSefaz: oficial.classificacao?.codigo === "autorizada",
+      origem: nota ? "registro_existente_conferido" : "consulta_oficial_sefaz",
+      numero: Number(identificacao.numero || nota?.numero || numeroChave || 0),
+      serie: Number(identificacao.serie || nota?.serie || serieChave || 1),
+      chave,
+      situacao: oficial.classificacao?.rotulo || "",
+      cStat: String(oficial.cStat || autorizacao.cStat || ""),
+      protocolo: String(autorizacao.nProt || ""),
+      dataAutorizacao: String(autorizacao.dhRecbto || ""),
+      ambiente: String(oficial.tpAmb || oficial.ambienteConsultado || ""),
+      possuiRegistroNoSistema: !!nota,
+      possuiXmlPersistido: !!xml,
+      vendaId: String(nota?.vendaId || ""),
+      id: String(nota?.id || ""),
+      total: nota?.total != null ? Number(nota.total) : null
+    };
+  }
+
   app.post("/conferencia-fiscal/consultar", protegerModuloConferencia, async (req, res) => {
     try {
       const id = String(req.body?.id || "").trim();
@@ -367,6 +469,10 @@ export function registrarConferenciaFiscal({
             error: "Nota não encontrada no Apps Script nem no armazenamento local."
           });
         }
+      } else if (chaveInformada) {
+        // Se a nota perdeu o vínculo local, tenta recuperá-la por chave
+        // antes da consulta oficial. Tudo continua somente leitura.
+        nota = await localizarNotaPorChaveConferencia(chaveInformada);
       }
 
       const xml = String(req.body?.xml || "") || await obterXmlAutorizadoConferencia(nota || {});
@@ -468,6 +574,7 @@ export function registrarConferenciaFiscal({
         nota: nota ? resumirNotaConferencia(nota) : null,
         ambienteDetectado: ambiente,
         resumoOficial,
+        recuperacao: montarResumoRecuperacaoConferencia(oficial, nota),
         oficial,
         divergencias: [...new Set(divergencias)]
       });
