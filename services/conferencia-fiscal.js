@@ -351,108 +351,6 @@ export function registrarConferenciaFiscal({
     }
   });
 
-  // ============================================================
-  // RECUPERAÇÃO SOMENTE LEITURA POR CHAVE NFC-e
-  // Não grava, não transmite e não altera numeração.
-  // Permite localizar um registro já existente e, quando ele não
-  // existe, devolver os dados oficiais que a SEFAZ disponibiliza
-  // pela consulta de protocolo. A gravação fica para etapa separada.
-  // ============================================================
-
-  async function localizarNotaPorChaveConferencia(chave = "") {
-    const chaveLimpa = somenteDigitos(chave);
-    if (chaveLimpa.length !== 44) return null;
-
-    // Primeiro procura no armazenamento persistente usado pelo sistema.
-    if (API_BELA_SHEETS) {
-      try {
-        const remotas = await listarNfceNotasRemotas({});
-        const encontrada = (Array.isArray(remotas) ? remotas : []).find(nota => {
-          const chaveNota = somenteDigitos(
-            nota?.chaveAcesso ||
-            nota?.chave ||
-            nota?.chaveNfce ||
-            nota?.chNFe ||
-            ""
-          );
-          return chaveNota === chaveLimpa;
-        });
-
-        if (encontrada) {
-          try {
-            return await lerNotaCompleta(encontrada.id || encontrada.vendaId || "") || encontrada;
-          } catch {
-            return encontrada;
-          }
-        }
-      } catch (erro) {
-        console.warn(
-          "[CONFERÊNCIA FISCAL] Falha ao procurar NFC-e por chave no Apps Script:",
-          erro.message
-        );
-      }
-    }
-
-    // Fallback para o armazenamento local do servidor.
-    try {
-      const locais = await listarNotasLocal();
-      return (Array.isArray(locais) ? locais : []).find(nota => {
-        const chaveNota = somenteDigitos(
-          nota?.chaveAcesso ||
-          nota?.chave ||
-          nota?.chaveNfce ||
-          nota?.chNFe ||
-          ""
-        );
-        return chaveNota === chaveLimpa;
-      }) || null;
-    } catch (erro) {
-      console.warn(
-        "[CONFERÊNCIA FISCAL] Falha ao procurar NFC-e por chave no armazenamento local:",
-        erro.message
-      );
-      return null;
-    }
-  }
-
-  function montarResumoRecuperacaoConferencia(oficial = {}, nota = null) {
-    const autorizacao = oficial.autorizacao || {};
-    const chave = somenteDigitos(
-      oficial.chNFe ||
-      autorizacao.chNFe ||
-      nota?.chaveAcesso ||
-      nota?.chave ||
-      ""
-    );
-
-    // A chave de acesso carrega série e número, mas eles só são
-    // usados como fallback quando o XML/registro local não está disponível.
-    const numeroChave = chave.length === 44 ? Number(chave.slice(25, 34)) : 0;
-    const serieChave = chave.length === 44 ? Number(chave.slice(22, 25)) : 0;
-
-    const xml = extrairXmlPersistidoConferencia(nota || {});
-    const identificacao = extrairIdentificacaoXmlNfce(xml);
-
-    return {
-      disponivel: oficial.classificacao?.confirmado === true,
-      confirmadoPelaSefaz: oficial.classificacao?.codigo === "autorizada",
-      origem: nota ? "registro_existente_conferido" : "consulta_oficial_sefaz",
-      numero: Number(identificacao.numero || nota?.numero || numeroChave || 0),
-      serie: Number(identificacao.serie || nota?.serie || serieChave || 1),
-      chave,
-      situacao: oficial.classificacao?.rotulo || "",
-      cStat: String(oficial.cStat || autorizacao.cStat || ""),
-      protocolo: String(autorizacao.nProt || ""),
-      dataAutorizacao: String(autorizacao.dhRecbto || ""),
-      ambiente: String(oficial.tpAmb || oficial.ambienteConsultado || ""),
-      possuiRegistroNoSistema: !!nota,
-      possuiXmlPersistido: !!xml,
-      vendaId: String(nota?.vendaId || ""),
-      id: String(nota?.id || ""),
-      total: nota?.total != null ? Number(nota.total) : null
-    };
-  }
-
   app.post("/conferencia-fiscal/consultar", protegerModuloConferencia, async (req, res) => {
     try {
       const id = String(req.body?.id || "").trim();
@@ -469,10 +367,6 @@ export function registrarConferenciaFiscal({
             error: "Nota não encontrada no Apps Script nem no armazenamento local."
           });
         }
-      } else if (chaveInformada) {
-        // Se a nota perdeu o vínculo local, tenta recuperá-la por chave
-        // antes da consulta oficial. Tudo continua somente leitura.
-        nota = await localizarNotaPorChaveConferencia(chaveInformada);
       }
 
       const xml = String(req.body?.xml || "") || await obterXmlAutorizadoConferencia(nota || {});
@@ -574,7 +468,6 @@ export function registrarConferenciaFiscal({
         nota: nota ? resumirNotaConferencia(nota) : null,
         ambienteDetectado: ambiente,
         resumoOficial,
-        recuperacao: montarResumoRecuperacaoConferencia(oficial, nota),
         oficial,
         divergencias: [...new Set(divergencias)]
       });
@@ -584,6 +477,147 @@ export function registrarConferenciaFiscal({
         somenteLeitura: true,
         alterouDados: false,
         error: e.message || "Falha na conferência fiscal."
+      });
+    }
+  });
+
+  // ============================================================
+  // RECUPERAÇÃO DE XML AUTORIZADO SEM REGISTRO DE VENDA
+  // Uso exclusivo para documentos já autorizados pela SEFAZ.
+  // Não cria venda, não altera estoque, caixa ou numeração.
+  // Apenas grava o documento fiscal e seu XML para a contabilidade.
+  // ============================================================
+  app.post("/conferencia-fiscal/importar-xml", protegerModuloConferencia, async (req, res) => {
+    try {
+      const xmlInformado = String(req.body?.xml || "").trim();
+
+      if (!xmlInformado || !xmlInformado.includes("<")) {
+        return res.status(400).json({
+          ok: false,
+          recuperado: false,
+          error: "Informe o XML autorizado completo da NFC-e."
+        });
+      }
+
+      const identificacao = extrairIdentificacaoXmlNfce(xmlInformado);
+      const chaveXml = somenteDigitos(identificacao.chave || "");
+
+      if (chaveXml.length !== 44) {
+        return res.status(400).json({
+          ok: false,
+          recuperado: false,
+          error: "O XML informado não possui uma chave de acesso válida de 44 dígitos."
+        });
+      }
+
+      const ambienteXml = String(
+        xmlInformado.match(/<tpAmb>\s*([12])\s*<\/tpAmb>/i)?.[1] || ""
+      );
+      const ambiente = ambienteXml || String(SEFAZ_CONFIG.ambiente || "1");
+
+      if (!["1", "2"].includes(ambiente)) {
+        return res.status(400).json({
+          ok: false,
+          recuperado: false,
+          error: "Não foi possível identificar o ambiente do XML."
+        });
+      }
+
+      // Antes de gravar, confirma a situação diretamente na SEFAZ.
+      const oficial = await consultarChaveConferenciaFiscal({
+        chave: chaveXml,
+        ambiente
+      });
+
+      const autorizada =
+        oficial.classificacao?.codigo === "autorizada" &&
+        String(oficial.autorizacao?.cStat || oficial.cStat || "") === "100" &&
+        !!String(oficial.autorizacao?.nProt || "").trim();
+
+      if (!autorizada) {
+        return res.status(409).json({
+          ok: false,
+          recuperado: false,
+          error: "O XML não pode ser importado porque a SEFAZ não confirmou a autorização desta NFC-e.",
+          oficial
+        });
+      }
+
+      const numero = Number(identificacao.numero || chaveXml.slice(25, 34) || 0);
+      const serie = Number(identificacao.serie || chaveXml.slice(22, 25) || 1);
+      const protocolo = String(oficial.autorizacao?.nProt || "").trim();
+      const dataAutorizacao = String(oficial.autorizacao?.dhRecbto || "").trim();
+      const xMotivo = String(oficial.autorizacao?.xMotivo || oficial.xMotivo || "Autorizado o uso da NF-e");
+      const totalXml = Number(
+        xmlInformado.match(/<vNF>\s*([0-9]+(?:\.[0-9]+)?)\s*<\/vNF>/i)?.[1] || 0
+      );
+      const dataEmissaoIso = String(
+        xmlInformado.match(/<dhEmi>\s*([^<]+)\s*<\/dhEmi>/i)?.[1] ||
+        xmlInformado.match(/<dEmi>\s*([^<]+)\s*<\/dEmi>/i)?.[1] ||
+        dataAutorizacao ||
+        new Date().toISOString()
+      ).trim();
+
+      const idRecuperacao = `nfce-recuperada-${chaveXml}`;
+      const nota = {
+        id: idRecuperacao,
+        vendaId: "",
+        numero,
+        serie,
+        dataEmissaoIso,
+        dataEmissaoBR: "",
+        cliente: { nome: "", cpf: "" },
+        total: totalXml,
+        status: "autorizada",
+        chave: chaveXml,
+        chaveAcesso: chaveXml,
+        pagamento: { tipo: "" },
+        protocolo,
+        pdf_url: "",
+        xml_url: "",
+        xml_autorizado: xmlInformado,
+        sefaz: {
+          transmitido: true,
+          autorizado: true,
+          cStat: "100",
+          xMotivo,
+          nProt: protocolo,
+          dhRecbto: dataAutorizacao,
+          tpAmb: ambiente
+        }
+      };
+
+      // Grava somente o documento fiscal/XML. Venda, estoque, caixa e
+      // numeração permanecem intocados.
+      await salvarXmlNfceRemoto(nota, xmlInformado);
+
+      return res.json({
+        ok: true,
+        recuperado: true,
+        somenteFiscal: true,
+        alterouVenda: false,
+        alterouEstoque: false,
+        alterouCaixa: false,
+        alterouNumeracao: false,
+        mensagem: "XML da NFC-e autorizada importado para o armazenamento fiscal.",
+        nota: {
+          id: idRecuperacao,
+          vendaId: "",
+          numero,
+          serie,
+          chave: chaveXml,
+          total: totalXml,
+          status: "autorizada",
+          protocolo,
+          dataAutorizacao,
+          ambiente
+        }
+      });
+    } catch (e) {
+      return res.status(400).json({
+        ok: false,
+        recuperado: false,
+        error: e.message || "Falha ao importar o XML autorizado."
       });
     }
   });
@@ -853,7 +887,8 @@ export function registrarConferenciaFiscal({
       h2{font-size:17px;margin:0 0 12px}
       .sub{color:#5f6368;margin-bottom:18px}
       .grid{display:grid;grid-template-columns:1fr 2fr 1.2fr 180px auto;gap:10px}
-      input,select,button{padding:11px 12px;border-radius:9px;border:1px solid #c9ccd5;font-size:14px}
+      input,select,button,textarea{padding:11px 12px;border-radius:9px;border:1px solid #c9ccd5;font-size:14px}
+      textarea{width:100%;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;line-height:1.35;resize:vertical;margin-top:2px}
       button{background:#1a5276;color:#fff;border:0;font-weight:700;cursor:pointer}
       button:hover{filter:brightness(1.08)}
       .resultado{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.45;background:#111827;color:#e5e7eb;padding:15px;border-radius:10px;min-height:90px;overflow:auto}
@@ -892,6 +927,10 @@ export function registrarConferenciaFiscal({
           <option value="2">Homologação</option>
         </select>
         <button onclick="consultar()">Consultar SEFAZ</button>
+        <button type="button" onclick="importarXml()" style="background:#176b36">Importar XML autorizado</button>
+      </div>
+      <div style="margin-top:12px">
+        <textarea id="xmlRecuperacao" rows="8" placeholder="Cole aqui o XML completo da NFC-e autorizada que não possui registro no sistema. A importação grava somente o documento fiscal e o XML."></textarea>
       </div>
     </div>
 
@@ -985,6 +1024,42 @@ export function registrarConferenciaFiscal({
       painel.style.display = "block";
     }catch(e){
       document.getElementById("painelOficial").style.display = "none";
+      resultado.textContent = "Erro: " + e.message;
+    }
+  }
+
+  async function importarXml(){
+    const xml = document.getElementById("xmlRecuperacao").value.trim();
+    if (!xml) {
+      alert("Cole o XML completo da NFC-e autorizada.");
+      return;
+    }
+
+    if (!confirm("Importar este XML somente para o registro fiscal? Nenhuma venda, estoque, caixa ou numeração será alterada.")) {
+      return;
+    }
+
+    resultado.textContent = "Validando autorização e importando XML...";
+
+    try {
+      const r = await fetch("/conferencia-fiscal/importar-xml", {
+        method: "POST",
+        headers: {"Content-Type":"application/json", ...headersAdministrativos()},
+        body: JSON.stringify({ xml })
+      });
+
+      const data = await r.json();
+      resultado.textContent = JSON.stringify(data, null, 2);
+
+      if (!r.ok || !data.ok) {
+        alert(data.error || "Não foi possível importar o XML.");
+        return;
+      }
+
+      alert("XML autorizado importado para o registro fiscal com sucesso.");
+      document.getElementById("xmlRecuperacao").value = "";
+      carregarNotas();
+    } catch (e) {
       resultado.textContent = "Erro: " + e.message;
     }
   }
