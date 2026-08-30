@@ -1186,38 +1186,23 @@ async function confirmarNumeroNfceRemoto(reserva, motivo = "") {
   return await alterarReservaNumeroNfceRemoto("confirmarNumeroNfce", reserva, motivo);
 }
 
-async function confirmarNumeroNfceRemotoComRetentativas(reserva, motivo = "") {
-  const atrasosMs = [0, 1000, 2000, 4000, 7000];
-  let ultimoErro = null;
+async function regularizarNumeroNfceRemoto({ numero, serie = 1, chave = "", protocolo = "", cStat = "100", motivo = "" } = {}) {
+  if (!numero) return null;
+  if (!API_BELA_SHEETS) throw new Error("API_BELA_SHEETS não configurada");
 
-  for (let tentativa = 0; tentativa < atrasosMs.length; tentativa++) {
-    const atraso = atrasosMs[tentativa];
-    if (atraso > 0) {
-      await new Promise(resolve => setTimeout(resolve, atraso));
-    }
-
-    try {
-      const retorno = await confirmarNumeroNfceRemoto(reserva, motivo);
-      if (retorno && retorno.ok !== false) {
-        return {
-          ok: true,
-          retorno,
-          tentativa: tentativa + 1
-        };
-      }
-
-      ultimoErro = new Error(
-        String(retorno && (retorno.error || retorno.message) || "Confirmação da numeração não concluída.")
-      );
-    } catch (e) {
-      ultimoErro = e;
-      console.error(
-        `[NFC-e] Tentativa ${tentativa + 1}/${atrasosMs.length} para confirmar o número ${reserva.numero} falhou: ${e.message}`
-      );
-    }
-  }
-
-  throw ultimoErro || new Error("Não foi possível confirmar a numeração NFC-e.");
+  return await fetchJson(API_BELA_SHEETS, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "regularizarNumeroNfce",
+      numero: Number(numero),
+      serie: Number(serie || 1),
+      chave: String(chave || ""),
+      protocolo: String(protocolo || ""),
+      cStat: String(cStat || ""),
+      motivo: String(motivo || "")
+    })
+  });
 }
 
 async function liberarNumeroNfceRemoto(reserva, motivo = "") {
@@ -1286,74 +1271,86 @@ function cStatConsomeNumeroNfce(cStat = "") {
 }
 
 async function finalizarReservaAposRetornoSefaz(reserva, retorno = {}) {
-  if (!reserva) return;
+  if (!reserva) return { ok: true, alterado: false };
 
   const cStat = String(retorno.cStat || "").trim();
   const motivo = String(retorno.xMotivo || "").trim();
 
   try {
     if (retorno.autorizado || cStatConsomeNumeroNfce(cStat)) {
-      const motivoConsumo = retorno.autorizado
-        ? "Autorizada pela SEFAZ"
-        : `Número fiscalmente ocupado: cStat ${cStat} ${motivo}`;
-
       try {
-        const confirmacao = await confirmarNumeroNfceRemotoComRetentativas(
+        await confirmarNumeroNfceRemoto(
           reserva,
-          motivoConsumo
+          retorno.autorizado ? "Autorizada pela SEFAZ" : `Número fiscalmente ocupado: cStat ${cStat} ${motivo}`
         );
-        console.log(
-          `[NFC-e] Número ${reserva.numero} confirmado como consumido ` +
-          `(tentativa ${confirmacao.tentativa}).`
-        );
-        return;
+        console.log(`[NFC-e] Número ${reserva.numero} confirmado como consumido.`);
+        return { ok: true, alterado: true, metodo: "confirmarNumeroNfce" };
       } catch (erroConfirmacao) {
-        // A SEFAZ já confirmou que o número foi consumido. Se o Apps Script
-        // estiver temporariamente ocupado, não podemos liberar o número.
-        // Colocamos a reserva em estado "incerta" como fallback seguro. A
-        // próxima reserva poderá reconciliá-la automaticamente ao encontrar
-        // a NFC-e autorizada/denegada já salva em nfce_notas.
-        console.error(
-          `[NFC-e] Confirmação definitiva do número ${reserva.numero} falhou após retentativas: ${erroConfirmacao.message}`
+        console.warn(
+          `[NFC-e] Confirmação da reserva ${reserva.numero} falhou: ${erroConfirmacao.message}. ` +
+          `Tentando regularização pelo resultado fiscal confirmado.`
         );
 
-        try {
-          await bloquearNumeroNfceRemoto(
-            reserva,
-            `SEFAZ confirmou consumo, mas a consolidação da reserva falhou temporariamente: ${erroConfirmacao.message}`
-          );
-          console.warn(
-            `[NFC-e] Número ${reserva.numero} mantido bloqueado como "incerta" para reconciliação automática.`
-          );
-          return;
-        } catch (erroBloqueio) {
-          console.error(
-            `[NFC-e] Não foi possível marcar a reserva ${reserva.numero} como incerta: ${erroBloqueio.message}`
-          );
-          throw erroBloqueio;
+        // A autorização da SEFAZ já é definitiva. Se a chamada original
+        // perdeu a janela do LockService, regularizamos pelo documento fiscal
+        // já salvo, sem depender do token da tentativa original.
+        const chave = String(retorno.chNFe || retorno.chave || "").trim();
+        const protocolo = String(retorno.nProt || retorno.protocolo || "").trim();
+        let ultimoErro = erroConfirmacao;
+
+        for (let tentativa = 1; tentativa <= 3; tentativa++) {
+          try {
+            const regularizado = await regularizarNumeroNfceRemoto({
+              numero: reserva.numero,
+              serie: reserva.serie || 1,
+              chave,
+              protocolo,
+              cStat,
+              motivo: retorno.autorizado ? "Autorizada pela SEFAZ; consolidação posterior da reserva." : motivo
+            });
+
+            if (regularizado && regularizado.ok) {
+              console.log(
+                `[NFC-e] Número ${reserva.numero} regularizado após falha da confirmação original ` +
+                `(tentativa ${tentativa}).`
+              );
+              return { ok: true, alterado: true, metodo: "regularizarNumeroNfce" };
+            }
+          } catch (erroRegularizacao) {
+            ultimoErro = erroRegularizacao;
+            if (tentativa < 3) await new Promise(resolve => setTimeout(resolve, 800 * tentativa));
+          }
         }
+
+        console.error(
+          `[NFC-e] Número ${reserva.numero} permanece pendente de consolidação. ` +
+          `A nota já foi confirmada pela SEFAZ. Último erro: ${ultimoErro.message}`
+        );
+        return { ok: false, alterado: false, pendente: true, erro: ultimoErro.message };
       }
     }
 
     if (retorno.transmitido && cStat) {
       await liberarNumeroNfceRemoto(reserva, `Rejeição SEFAZ cStat ${cStat}: ${motivo}`);
       console.log(`[NFC-e] Número ${reserva.numero} liberado após rejeição da SEFAZ.`);
-      return;
+      return { ok: true, alterado: true, metodo: "liberarNumeroNfce" };
     }
 
     if (!retorno.transmitido) {
       await liberarNumeroNfceRemoto(reserva, motivo || "Tentativa não transmitida à SEFAZ");
       console.log(`[NFC-e] Número ${reserva.numero} liberado; não houve transmissão à SEFAZ.`);
-      return;
+      return { ok: true, alterado: true, metodo: "liberarNumeroNfce" };
     }
 
     await bloquearNumeroNfceRemoto(reserva, "Transmissão realizada sem resultado fiscal conclusivo.");
     console.error(`[NFC-e] Número ${reserva.numero} BLOQUEADO por resultado fiscal incerto.`);
+    return { ok: true, alterado: true, metodo: "bloquearNumeroNfce" };
   } catch (e) {
     console.error(
       `[NFC-e] Falha ao finalizar reserva do número ${reserva.numero}. ` +
       `A emissão seguinte deve permanecer bloqueada até conferência: ${e.message}`
     );
+    return { ok: false, alterado: false, pendente: true, erro: e.message };
   }
 }
 
