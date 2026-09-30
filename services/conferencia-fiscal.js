@@ -1001,6 +1001,36 @@ export function registrarConferenciaFiscal({
         resumo.codigoSituacao === "cancelada" ? "cancel-status" :
         "warn-status";
 
+      const botoesAcao = [];
+
+      if (
+        resumo.codigoSituacao === "autorizada" &&
+        data.nota &&
+        data.nota.id
+      ) {
+        botoesAcao.push(
+          '<button style="margin-top:12px;background:#b3261e" onclick="cancelarNota(\\''+
+          escapar(data.nota.id)+
+          '\\','+
+          Number(data.nota.numero || 0)+
+          ')">Cancelar NFC-e</button>'
+        );
+      }
+
+      if (resumo.codigoSituacao === "cancelada") {
+        botoesAcao.push(
+          '<button style="margin-top:12px;margin-left:8px" onclick="sincronizarCancelamento()">Sincronizar cancelamento na planilha</button>'
+        );
+      } else if (
+        resumo.codigoSituacao === "autorizada" &&
+        data.nota &&
+        !String(data.nota.statusInterno || "").toLowerCase().includes("autoriz")
+      ) {
+        botoesAcao.push(
+          '<button style="margin-top:12px;margin-left:8px" onclick="sincronizarAutorizacao()">Sincronizar autorização na planilha</button>'
+        );
+      }
+
       painel.innerHTML =
         '<h3>🏛️ Resposta oficial da SEFAZ MG</h3>'+ 
         '<div class="oficial-grid">'+
@@ -1015,11 +1045,7 @@ export function registrarConferenciaFiscal({
         '</div>'+ 
         '<details><summary>Ver resposta técnica completa</summary><p>O JSON técnico aparece no quadro escuro abaixo.</p></details>'+ 
         '<p style="margin:14px 0 0;color:#5f6368"><strong>Fonte:</strong> '+escapar(resumo.fonte)+'</p>'+
-        (resumo.codigoSituacao === "cancelada"
-          ? '<button style="margin-top:12px" onclick="sincronizarCancelamento()">Sincronizar cancelamento na planilha</button>'
-          : resumo.codigoSituacao === "autorizada" && data.nota && !String(data.nota.statusInterno || "").toLowerCase().includes("autoriz")
-            ? '<button style="margin-top:12px" onclick="sincronizarAutorizacao()">Sincronizar autorização na planilha</button>'
-            : '');
+        botoesAcao.join('');
 
       painel.style.display = "block";
     }catch(e){
@@ -1097,6 +1123,108 @@ export function registrarConferenciaFiscal({
       carregarNotas();
     } catch (e) {
       resultado.textContent = "Erro: " + e.message;
+    }
+  }
+
+  async function cancelarNota(id, numero){
+    const notaId = String(id || "").trim();
+
+    if (!notaId) {
+      alert("Não foi possível identificar a nota para cancelamento.");
+      return;
+    }
+
+    const confirmacao = confirm(
+      "ATENÇÃO: o cancelamento será enviado oficialmente para a SEFAZ.\\n\\n" +
+      "NFC-e: " + (numero || "não informado") + "\\n\\n" +
+      "Esta ação não deve ser usada para corrigir uma venda comum. Confirme somente se você realmente deseja cancelar esta NFC-e."
+    );
+
+    if (!confirmacao) return;
+
+    const motivo = prompt(
+      "Informe o motivo do cancelamento (15 a 255 caracteres):"
+    );
+
+    if (motivo === null) return;
+
+    const justificativa = String(motivo).trim();
+
+    if (justificativa.length < 15 || justificativa.length > 255) {
+      alert("O motivo do cancelamento deve ter entre 15 e 255 caracteres.");
+      return;
+    }
+
+    resultado.textContent =
+      "Confirmando a autorização da NFC-e e recuperando o protocolo antes do cancelamento...";
+
+    try {
+      // Primeiro recupera a autorização oficial e corrige o registro local,
+      // caso a SEFAZ tenha autorizado mas o protocolo não tenha sido salvo.
+      const sincronizacao = await fetch("/conferencia-fiscal/sincronizar-autorizacao", {
+        method: "POST",
+        headers: {"Content-Type":"application/json", ...headersAdministrativos()},
+        body: JSON.stringify({ id: notaId })
+      });
+
+      const dadosSincronizacao = await sincronizacao.json();
+
+      if (!sincronizacao.ok || !dadosSincronizacao.ok) {
+        throw new Error(
+          dadosSincronizacao.error ||
+          "A SEFAZ não pôde ser sincronizada antes do cancelamento."
+        );
+      }
+
+      if (
+        dadosSincronizacao.nota &&
+        !String(dadosSincronizacao.nota.protocolo || "").trim()
+      ) {
+        throw new Error(
+          "A autorização foi consultada, mas o protocolo não foi recuperado. O cancelamento não foi enviado."
+        );
+      }
+
+      resultado.textContent =
+        "Autorização confirmada. Enviando o cancelamento para a SEFAZ...";
+
+      const resposta = await fetch(
+        "/nfce/" + encodeURIComponent(notaId) + "/cancelar",
+        {
+          method: "POST",
+          headers: {"Content-Type":"application/json", ...headersAdministrativos()},
+          body: JSON.stringify({ motivo: justificativa })
+        }
+      );
+
+      const data = await resposta.json();
+      resultado.textContent = JSON.stringify(data, null, 2);
+
+      if (!resposta.ok || !data.ok) {
+        alert(data.error || "A SEFAZ não confirmou o cancelamento.");
+        return;
+      }
+
+      if (!data.cancelado) {
+        alert(
+          data.xMotivo ||
+          "O pedido foi processado, mas a SEFAZ ainda não confirmou o cancelamento."
+        );
+        return;
+      }
+
+      alert(
+        "Cancelamento confirmado pela SEFAZ.\n\n" +
+        "NFC-e: " + (numero || "não informado") +
+        "\\nProtocolo do cancelamento: " +
+        (data.nProt || "não informado")
+      );
+
+      await consultar(notaId);
+      carregarNotas();
+    } catch (e) {
+      resultado.textContent = "Erro: " + e.message;
+      alert(e.message || "Falha ao cancelar a NFC-e.");
     }
   }
 
