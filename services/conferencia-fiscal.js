@@ -753,89 +753,6 @@ export function registrarConferenciaFiscal({
     }
   });
 
-  app.post("/conferencia-fiscal/cancelar", protegerModuloConferencia, async (req, res) => {
-    try {
-      const id = String(req.body?.id || "").trim();
-      const motivo = String(req.body?.motivo || "").trim();
-
-      if (!id) {
-        return res.status(400).json({
-          ok: false,
-          error: "Informe o ID da nota para cancelamento."
-        });
-      }
-
-      if (motivo.length < 15) {
-        return res.status(400).json({
-          ok: false,
-          error: "O motivo do cancelamento deve ter pelo menos 15 caracteres."
-        });
-      }
-
-      const nota = await lerNotaCompleta(id);
-
-      if (!nota) {
-        return res.status(404).json({
-          ok: false,
-          error: "Nota não encontrada."
-        });
-      }
-
-      const xml = await obterXmlAutorizadoConferencia(nota);
-      const identificacao = extrairIdentificacaoXmlNfce(xml);
-
-      const chave = somenteDigitos(
-        identificacao.chave ||
-        nota.chaveAcesso ||
-        nota.chave ||
-        ""
-      );
-
-      if (chave.length !== 44) {
-        return res.status(409).json({
-          ok: false,
-          error: "A nota não possui uma chave de acesso válida de 44 dígitos."
-        });
-      }
-
-      const ambiente = identificarAmbienteConferencia({
-        nota,
-        xml,
-        ambienteInformado: "auto"
-      });
-
-      // Este arquivo não recebe a rotina de assinatura/transmissão do evento
-      // 110111. Não é seguro marcar a nota como cancelada sem a confirmação
-      // oficial da SEFAZ.
-      return res.status(501).json({
-        ok: false,
-        cancelado: false,
-        alterouSefaz: false,
-        alterouDados: false,
-        error:
-          "A tela de Conferência Fiscal foi preparada para o cancelamento, " +
-          "mas a rotina de transmissão do evento 110111 à SEFAZ não está disponível " +
-          "neste módulo. Nenhum status foi alterado.",
-        nota: {
-          id: nota.id,
-          numero: nota.numero,
-          serie: nota.serie,
-          chave
-        },
-        ambiente: ambiente.ambiente,
-        motivo
-      });
-    } catch (e) {
-      return res.status(400).json({
-        ok: false,
-        cancelado: false,
-        alterouSefaz: false,
-        alterouDados: false,
-        error: e.message || "Falha ao preparar o cancelamento."
-      });
-    }
-  });
-
   app.post("/conferencia-fiscal/sincronizar-cancelamento", protegerModuloConferencia, async (req, res) => {
     try {
       const id = String(req.body?.id || "").trim();
@@ -1028,7 +945,7 @@ export function registrarConferenciaFiscal({
       <button class="mini" onclick="carregarNotas()">Atualizar lista</button>
       <div style="overflow:auto;margin-top:10px">
         <table>
-          <thead><tr><th>Nº</th><th>Ambiente</th><th>Status interno</th><th>Chave</th><th>Ações</th></tr></thead>
+          <thead><tr><th>Nº</th><th>Ambiente</th><th>Status interno</th><th>Chave</th><th></th></tr></thead>
           <tbody id="lista"><tr><td colspan="5">Carregando...</td></tr></tbody>
         </table>
       </div>
@@ -1219,90 +1136,6 @@ export function registrarConferenciaFiscal({
     }
   }
 
-  function selecionarNota(id){
-    document.getElementById("idNota").value = id || "";
-    document.getElementById("chave").value = "";
-    consultar(id);
-  }
-
-  async function cancelarNota(id){
-    if (!id) {
-      alert("Não foi possível identificar a nota para cancelamento.");
-      return;
-    }
-
-    document.getElementById("idNota").value = id;
-
-    if (!confirm(
-      "ATENÇÃO: o cancelamento é uma operação fiscal.\n\n" +
-      "Confirme somente se esta NFC-e realmente deve ser cancelada."
-    )) {
-      return;
-    }
-
-    const motivo = prompt(
-      "Informe o motivo do cancelamento (mínimo de 15 caracteres):"
-    );
-
-    if (motivo === null) return;
-
-    const motivoLimpo = String(motivo).trim();
-
-    if (motivoLimpo.length < 15) {
-      alert("O motivo do cancelamento deve ter pelo menos 15 caracteres.");
-      return;
-    }
-
-    resultado.textContent = "Processando solicitação de cancelamento...";
-
-    try {
-      const r = await fetch("/conferencia-fiscal/cancelar", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...headersAdministrativos()
-        },
-        body: JSON.stringify({
-          id,
-          motivo: motivoLimpo
-        })
-      });
-
-      const data = await r.json().catch(() => ({
-        ok: false,
-        error: "A resposta do servidor não está em formato JSON."
-      }));
-
-      resultado.textContent = JSON.stringify(data, null, 2);
-
-      if (!r.ok || !data.ok) {
-        alert(
-          data.error ||
-          "Não foi possível cancelar a NFC-e. Nenhum status local foi alterado."
-        );
-        return;
-      }
-
-      alert(
-        data.mensagem ||
-        "Cancelamento processado com sucesso."
-      );
-
-      await carregarNotas();
-
-      // Consulta novamente a nota para mostrar a situação oficial atual.
-      await consultar(id);
-
-    } catch (e) {
-      resultado.textContent = "Erro: " + e.message;
-      alert(
-        "Falha ao solicitar o cancelamento.\n\n" +
-        e.message +
-        "\n\nNenhum cancelamento foi considerado concluído pela tela."
-      );
-    }
-  }
-
   async function carregarNotas(){
     const corpo = document.getElementById("lista");
     corpo.innerHTML = '<tr><td colspan="5">Carregando...</td></tr>';
@@ -1322,12 +1155,7 @@ export function registrarConferenciaFiscal({
           '<td><span class="badge '+classe+'">'+escapar(n.ambienteNome)+'</span></td>'+
           '<td>'+escapar(n.statusInterno || "sem status")+'</td>'+
           '<td style="font-family:monospace">'+escapar(n.chave)+'</td>'+
-          '<td style="white-space:nowrap">'+
-          '<button class="mini" onclick="selecionarNota(\\''+escapar(n.id)+'\\')">Consultar</button> '+
-          (String(n.statusInterno || "").toLowerCase().includes("cancelad")
-            ? '<button class="mini" disabled style="opacity:.55;cursor:not-allowed">Já cancelada</button>'
-            : '<button class="mini" style="background:#b3261e" onclick="cancelarNota(\\''+escapar(n.id)+'\\')">Cancelar nota</button>')+
-          '</td>'+
+          '<td><button class="mini" onclick="consultar(\\''+escapar(n.id)+'\\')">Consultar</button></td>'+
         '</tr>';
       }).join("") || '<tr><td colspan="5">Nenhuma nota encontrada.</td></tr>';
     }catch(e){
