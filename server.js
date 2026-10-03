@@ -341,6 +341,13 @@ const CSC_CONFIG = {
 let sequencial = 1;
 let filaReservaNumeroNfce = Promise.resolve();
 
+// ================= MONITORAMENTO AUTOMÁTICO SEFAZ =================
+// Uma transmissão que começou e perdeu a resposta NÃO pode liberar nem
+// reutilizar o número. A nota fica persistida como incerta e este monitor
+// consulta a chave automaticamente até existir um resultado fiscal conclusivo.
+const SEFAZ_CONSULTA_INTERVAL_MS = Math.max(5000, Number(process.env.SEFAZ_CONSULTA_INTERVAL_MS || 15000));
+const monitoramentosNfceSefaz = new Map();
+
 async function comTravaLocalNumeroNfce(fn) {
   const anterior = filaReservaNumeroNfce;
   let liberar;
@@ -2550,6 +2557,242 @@ async function transmitirNfceSefaz(nota, xmlAssinado) {
   };
 }
 
+async function obterXmlAssinadoPersistido(nota = {}) {
+  if (nota.xml_assinado_conteudo) return String(nota.xml_assinado_conteudo);
+
+  if (!API_BELA_SHEETS) return "";
+
+  try {
+    const mes = nota.mesRef || dataMesRef(nota.dataEmissaoIso || nota.dataEmissao || Date.now());
+    const rows = await listarXmlMesRemoto(mes);
+    const registro = rows.find(row => String(row.id || "") === String(nota.id || ""));
+    return String(registro?.xml || "");
+  } catch (e) {
+    console.warn(`[SEFAZ] Não foi possível recuperar o XML assinado da NFC-e ${nota.numero || nota.id}: ${e.message}`);
+    return "";
+  }
+}
+
+function montarNfeProcDaConsulta(xmlAssinado, xmlConsulta) {
+  const infProtMatch = String(xmlConsulta || "").match(/<(?:\w+:)?infProt\b[\s\S]*?<\/(?:\w+:)?infProt>/i);
+  if (!infProtMatch || !xmlAssinado) return "";
+
+  const nfeSemDecl = String(xmlAssinado).replace(/<\?xml[^>]*\?>/i, "").trim();
+  const infProt = infProtMatch[0];
+
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">\n${nfeSemDecl}\n<protNFe xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">${infProt}</protNFe>\n</nfeProc>`;
+}
+
+function retornoSefazDaConsulta(nota, consulta, xmlAssinado = "") {
+  const autorizacao = consulta?.autorizacao || {};
+  const cStat = String(autorizacao.cStat || consulta?.cStat || "").trim();
+  const xMotivo = String(autorizacao.xMotivo || consulta?.xMotivo || "").trim();
+  const autorizado = cStat === "100" && !!autorizacao.nProt;
+
+  return {
+    ok: !!consulta?.ok,
+    transmitido: true,
+    resultadoIncerto: false,
+    consultaAutomatica: true,
+    httpStatus: consulta?.httpStatus || "",
+    cStat,
+    xMotivo,
+    cStatLote: consulta?.cStat || "",
+    cStatProtocolo: autorizacao.cStat || "",
+    xMotivoProtocolo: autorizacao.xMotivo || "",
+    nProt: autorizacao.nProt || "",
+    chNFe: autorizacao.chNFe || consulta?.chNFe || nota.chaveAcesso || nota.chave || "",
+    dhRecbto: autorizacao.dhRecbto || "",
+    autorizado,
+    xmlRetorno: consulta?.xmlRetorno || "",
+    nfeProc: autorizado ? montarNfeProcDaConsulta(xmlAssinado, consulta.xmlRetorno) : ""
+  };
+}
+
+function consultaSefazEhDefinitiva(consulta = {}) {
+  const cStatProtocolo = String(consulta.autorizacao?.cStat || "").trim();
+
+  // A existência de infProt significa que a SEFAZ já definiu o destino
+  // daquela chave, seja autorização, rejeição ou outro resultado fiscal.
+  if (cStatProtocolo) return true;
+
+  // Sem infProt, códigos como 217/108/109 indicam que a consulta ainda não
+  // conseguiu obter a situação definitiva. Continuamos consultando.
+  return false;
+}
+
+async function marcarNfceAguardandoConsultaSefaz(nota, reserva, erro = "") {
+  const atual = await lerNotaLocal(nota.id) || nota;
+
+  atual.status = "pendente_sefaz";
+  atual.sefaz = Object.assign({}, atual.sefaz || {}, {
+    transmitido: true,
+    autorizado: false,
+    resultadoIncerto: true,
+    aguardandoConsulta: true,
+    cStat: "",
+    xMotivo: "A transmissão foi iniciada, mas a resposta fiscal não chegou. A SEFAZ será consultada automaticamente.",
+    erroTransporte: String(erro || ""),
+    atualizadoEm: new Date().toISOString()
+  });
+
+  atual.reservaNfce = {
+    numero: Number(reserva?.numero || atual.numero || 0),
+    serie: Number(reserva?.serie || atual.serie || 1),
+    token: String(reserva?.token || ""),
+    vendaId: String(reserva?.vendaId || atual.vendaId || atual.id || "")
+  };
+
+  atual.resumoFiscal = criarResumoFiscal(atual);
+  await salvarNota(atual);
+
+  if (API_BELA_SHEETS) {
+    try {
+      await salvarXmlNfceRemoto(atual, atual.xml_assinado_conteudo || atual.xml || "");
+    } catch (e) {
+      console.error("⚠ não foi possível persistir o estado pendente no Apps Script:", e.message);
+    }
+  }
+
+  try {
+    await bloquearNumeroNfceRemoto(atual.reservaNfce,
+      `Resultado fiscal incerto após transmissão: ${String(erro || "sem detalhe")}`
+    );
+  } catch (e) {
+    console.error("❌ Falha ao bloquear a numeração durante resultado incerto:", e.message);
+  }
+
+  return atual;
+}
+
+async function concluirMonitoramentoNfceSefaz(nota, reserva, consulta) {
+  const xmlAssinado = await obterXmlAssinadoPersistido(nota);
+  const retorno = retornoSefazDaConsulta(nota, consulta, xmlAssinado);
+  const atualizada = await salvarRetornoSefazLocal(nota, retorno);
+
+  const reservaEfetiva = reserva || nota.reservaNfce || null;
+  if (reservaEfetiva?.token) {
+    await finalizarReservaAposRetornoSefaz(reservaEfetiva, retorno);
+  } else {
+    console.warn(`[SEFAZ] NFC-e ${nota.numero}: resultado concluído, mas não foi encontrada a reserva persistida para finalizar.`);
+  }
+
+  atualizada.reservaNfce = Object.assign({}, atualizada.reservaNfce || {}, {
+    resolvidaEm: new Date().toISOString()
+  });
+  atualizada.sefaz = Object.assign({}, atualizada.sefaz || {}, {
+    aguardandoConsulta: false,
+    resultadoIncerto: false,
+    consultaAutomatica: true
+  });
+  await salvarNota(atualizada);
+
+  return { atualizada, retorno };
+}
+
+async function monitorarNfceAteResultado(idNota) {
+  const id = String(idNota || "").trim();
+  if (!id) return;
+
+  if (monitoramentosNfceSefaz.has(id)) {
+    return monitoramentosNfceSefaz.get(id);
+  }
+
+  const tarefa = (async () => {
+    console.log(`[SEFAZ-MONITOR] Iniciado para NFC-e ${id}. Intervalo ${SEFAZ_CONSULTA_INTERVAL_MS} ms.`);
+
+    while (true) {
+      let nota = await lerNotaCompleta(id);
+
+      if (!nota) {
+        console.warn(`[SEFAZ-MONITOR] NFC-e ${id} não encontrada. Nova tentativa em ${SEFAZ_CONSULTA_INTERVAL_MS} ms.`);
+        await new Promise(resolve => setTimeout(resolve, SEFAZ_CONSULTA_INTERVAL_MS));
+        continue;
+      }
+
+      if (nota.status === "autorizada" || nota.sefaz?.autorizado === true) {
+        console.log(`[SEFAZ-MONITOR] NFC-e ${nota.numero} já consta como autorizada. Monitoramento encerrado.`);
+        return nota;
+      }
+
+      try {
+        const consulta = await consultarSituacaoNfceSefaz(nota);
+
+        if (consultaSefazEhDefinitiva(consulta)) {
+          const reserva = nota.reservaNfce || null;
+          const resultado = await concluirMonitoramentoNfceSefaz(nota, reserva, consulta);
+          console.log(
+            `[SEFAZ-MONITOR] NFC-e ${nota.numero} concluída: cStat=${resultado.retorno.cStat || ""} ` +
+            `autorizada=${resultado.retorno.autorizado ? "sim" : "não"}.`
+          );
+          return resultado.atualizada;
+        }
+
+        console.log(
+          `[SEFAZ-MONITOR] NFC-e ${nota.numero} ainda sem protocolo definitivo: ` +
+          `cStatConsulta=${consulta.cStat || ""} ${consulta.xMotivo || ""}.`
+        );
+      } catch (e) {
+        console.warn(`[SEFAZ-MONITOR] Falha na consulta da NFC-e ${nota.numero}: ${e.message}`);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, SEFAZ_CONSULTA_INTERVAL_MS));
+    }
+  })().finally(() => {
+    monitoramentosNfceSefaz.delete(id);
+  });
+
+  monitoramentosNfceSefaz.set(id, tarefa);
+  return tarefa;
+}
+
+async function iniciarMonitoramentoPendentesNfce() {
+  try {
+    const ids = new Set();
+    const locais = await listarNotasLocal();
+
+    for (const nota of locais) {
+      if (nota?.sefaz?.aguardandoConsulta === true || nota?.sefaz?.resultadoIncerto === true || nota?.status === "pendente_sefaz") {
+        if (nota.id) ids.add(String(nota.id));
+      }
+    }
+
+    if (API_BELA_SHEETS) {
+      try {
+        const remotas = await listarNfceNotasRemotas({});
+        for (const resumo of remotas) {
+          if (!resumo?.id || !String(resumo.status || "").toLowerCase().includes("pendente")) continue;
+
+          try {
+            const nota = await getNfceNotaRemota(resumo.id);
+            if (nota?.sefaz?.aguardandoConsulta === true || nota?.sefaz?.resultadoIncerto === true || nota?.status === "pendente_sefaz") {
+              ids.add(String(nota.id));
+            }
+          } catch (e) {
+            console.warn(`[SEFAZ-MONITOR] Não foi possível recuperar a NFC-e ${resumo.id} do Apps Script: ${e.message}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[SEFAZ-MONITOR] Falha ao procurar pendências no Apps Script: ${e.message}`);
+      }
+    }
+
+    if (!ids.size) {
+      console.log("[SEFAZ-MONITOR] Nenhuma NFC-e pendente encontrada na inicialização.");
+      return;
+    }
+
+    console.log(`[SEFAZ-MONITOR] Retomando ${ids.size} NFC-e(s) pendente(s) após inicialização.`);
+    for (const id of ids) {
+      monitorarNfceAteResultado(id).catch(e => {
+        console.error(`[SEFAZ-MONITOR] Erro inesperado ao monitorar ${id}:`, e.message);
+      });
+    }
+  } catch (e) {
+    console.error("❌ Falha ao iniciar monitoramento automático de NFC-e:", e.message);
+  }
+}
+
 async function salvarRetornoSefazLocal(nota, retornoSefaz) {
   const atual = await lerNotaLocal(nota.id) || nota;
 
@@ -3312,6 +3555,8 @@ app.post("/nfce/emitir", async (req, res) => {
 
     nota.xml_assinado = assinatura.assinado;
     nota.erro_assinatura = assinatura.erro;
+    nota.xml_assinado_conteudo = assinatura.assinado ? xml : "";
+    nota.reservaNfce = { ...reservaNumero };
 
     await salvarNota(nota);
 
@@ -3387,22 +3632,94 @@ app.post("/nfce/emitir", async (req, res) => {
     try {
       retornoSefaz = await transmitirNfceSefaz(nota, xml);
     } catch (erroTransmissao) {
-      // Depois que a chamada de transmissão começou, uma exceção de rede é
-      // tratada como resultado INCERTO. O número não pode ser liberado até
-      // consulta oficial confirmar o destino fiscal da chave.
-      try {
-        await bloquearNumeroNfceRemoto(
-          reservaNumero,
-          `Falha durante comunicação com a SEFAZ: ${erroTransmissao.message || "sem detalhe"}`
-        );
-      } catch (erroBloqueio) {
-        console.error("❌ Falha ao bloquear numeração após erro de transmissão:", erroBloqueio.message);
-      }
-      throw erroTransmissao;
+      // A transmissão já começou. Não liberamos o número e não reenviamos a
+      // mesma chave. Persistimos o estado incerto e iniciamos consulta automática.
+      const pendente = await marcarNfceAguardandoConsultaSefaz(
+        nota,
+        reservaNumero,
+        erroTransmissao.message || "Falha de comunicação com a SEFAZ"
+      );
+
+      monitorarNfceAteResultado(nota.id).catch(e => {
+        console.error(`[SEFAZ-MONITOR] Falha inesperada na NFC-e ${nota.numero}:`, e.message);
+      });
+
+      return res.status(202).json({
+        ok: false,
+        pendente_consulta_sefaz: true,
+        mensagem: "A transmissão foi iniciada, mas a resposta da SEFAZ não chegou. A nota permanece reservada e será consultada automaticamente até obter um resultado definitivo.",
+        nfce: {
+          id: pendente.id,
+          numero: pendente.numero,
+          serie: pendente.serie,
+          chave: pendente.chaveAcesso || pendente.chave,
+          status: pendente.status,
+          pdf_url: pendente.pdf_url,
+          xml_url: pendente.xml_url,
+          numeracao_origem: numeracaoOrigem,
+          xml_salvo_apps_script: xmlSalvoNoAppsScript,
+          xml_assinado: true,
+          transmitido: true,
+          autorizado: false,
+          resultado_incerto: true,
+          consulta_automatica: true,
+          numero_reservado: true,
+          erro_transmissao: erroTransmissao.message || "Falha de comunicação com a SEFAZ"
+        }
+      });
+    }
+
+    // A SEFAZ pode aceitar/processar o lote sem devolver ainda o protocolo
+    // individual. Nesse caso o número continua reservado e a chave passa a ser
+    // acompanhada automaticamente pela consulta de protocolo.
+    if (retornoSefaz.recebido && !retornoSefaz.cStatProtocolo && !retornoSefaz.autorizado) {
+      const pendente = await marcarNfceAguardandoConsultaSefaz(
+        nota,
+        reservaNumero,
+        `SEFAZ recebeu/processou o lote (${retornoSefaz.cStatLote || retornoSefaz.cStat}), mas ainda não devolveu o protocolo individual.`
+      );
+
+      monitorarNfceAteResultado(nota.id).catch(e => {
+        console.error(`[SEFAZ-MONITOR] Falha inesperada na NFC-e ${nota.numero}:`, e.message);
+      });
+
+      return res.status(202).json({
+        ok: false,
+        pendente_consulta_sefaz: true,
+        mensagem: "A SEFAZ recebeu a transmissão, mas ainda não devolveu o resultado individual da NFC-e. A nota permanece reservada e será consultada automaticamente.",
+        nfce: {
+          id: pendente.id,
+          numero: pendente.numero,
+          serie: pendente.serie,
+          chave: pendente.chaveAcesso || pendente.chave,
+          status: pendente.status,
+          pdf_url: pendente.pdf_url,
+          xml_url: pendente.xml_url,
+          numeracao_origem: numeracaoOrigem,
+          xml_salvo_apps_script: xmlSalvoNoAppsScript,
+          xml_assinado: true,
+          transmitido: true,
+          autorizado: false,
+          resultado_incerto: true,
+          consulta_automatica: true,
+          numero_reservado: true,
+          cStat: retornoSefaz.cStat || "",
+          xMotivo: retornoSefaz.xMotivo || ""
+        }
+      });
     }
 
     const notaAtualizada = await salvarRetornoSefazLocal(nota, retornoSefaz);
     await finalizarReservaAposRetornoSefaz(reservaNumero, retornoSefaz);
+    notaAtualizada.sefaz = Object.assign({}, notaAtualizada.sefaz || {}, {
+      aguardandoConsulta: false,
+      resultadoIncerto: false,
+      consultaAutomatica: false
+    });
+    notaAtualizada.reservaNfce = Object.assign({}, notaAtualizada.reservaNfce || {}, {
+      resolvidaEm: new Date().toISOString()
+    });
+    await salvarNota(notaAtualizada);
     reservaNumero = null;
 
     console.log(
@@ -3889,6 +4206,14 @@ function validarAmbienteSefazNaInicializacao() {
 }
 
 validarAmbienteSefazNaInicializacao();
+
+// Retoma automaticamente notas que ficaram sem resposta fiscal caso o
+// Render reinicie ou a conexão do cliente seja encerrada durante a emissão.
+setTimeout(() => {
+  iniciarMonitoramentoPendentesNfce().catch(e => {
+    console.error("❌ Erro no monitoramento inicial das NFC-e:", e.message);
+  });
+}, 3000);
 
 app.listen(PORT, () => {
       console.log(`Bela Caixa API rodando na porta ${PORT}`);
